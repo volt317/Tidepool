@@ -13,6 +13,77 @@ it.
 > A tidepool is what the ocean leaves behind where you can actually look at
 > it. Upstream churns constantly; this makes your slice of it inspectable.
 
+## Layered architecture
+
+The development direction ("inflow awareness → truth snapshots → dispatch
+analysis") is implemented as strictly separated layers, each forbidden from
+reaching past its boundary:
+
+```
+collectors observe        domains/  (apt pockets, registry surfaces, feeds)
+normalizers structure     the same modules — pure bytes → records
+history preserves         core/inflow.ts   append-only Observations, content-
+                          addressed record blobs; nothing ever rewritten
+change detection compares core/inflow.ts   deterministic diffs of consecutive
+                          observations; every change names its observation pair
+inflow heuristics         core/inflow.ts   rule-id'd findings with confidence
+interpret                 basis, evidence refs, ambiguities; read-only
+snapshots compress and    core/snapshot.ts three stages (observation ⊂ churn ⊂
+export truth              interpretive), content-addressed, store-only,
+                          six export formats from one model
+project analyzers         dispatch/analyze.ts  classify, fingerprint, extract
+understand local state    dependencies — never embedded in collectors
+dispatch evaluates the    dispatch/analyze.ts + cli/dispatch.js  snapshot ×
+relationship              paths → immutable findings artifact
+```
+
+## Inflow: observations and changes
+
+Every real collection appends one immutable **Observation** per source:
+authority, source, collection time, scope, verification state (and signer),
+coverage limitations, raw-artifact digest, parser version, configuration
+version, and a content address of the normalized records (stored once —
+identical re-observations cost one log line, not a copy). Consecutive
+observations of a source are diffed deterministically into **ChangeRecords**
+(package-added/removed, version-moved, metadata-changed, advisory-published/
+modified/withdrawn, source-failure/recovery, verification/signer transitions),
+each naming the observation pair it came from. Heuristic rules
+(`inflow.release-burst`, `inflow.security-burst`, `inflow.corrective-release`,
+`inflow.source-degradation`, `inflow.signer-transition`) read that history and
+emit findings with rule ids, confidence basis, evidence references, and their
+own ambiguities — and can never mutate it.
+
+## Snapshots: bounded truth
+
+`POST /api/snapshots {stage, windowHours | from,to}` builds a snapshot from
+the store alone (never the network): scope, window, authorities, per-source
+coverage with verification state, **an explicit notObserved list** (failed
+sources, never-synced units, coverage limitations), entities, observations,
+changes, relationships (e.g. advisory ↔ version movement on one package =
+security-response), findings, and ambiguities. Content-addressed over
+canonical JSON with the digest binding content rather than wall-clock —
+rebuilding the same explicit window from the same store yields the same
+digest (smoke-asserted). Exports — JSON, NDJSON, Markdown, HTML, SQLite
+(node:sqlite single-file database), and a tar.gz bundle — all render from
+the same SnapshotDoc.
+
+## Dispatch: snapshots × project paths
+
+`node server/dist/server/src/cli/dispatch.js --snapshot <digest|latest>
+[--store DIR] [--out FILE] <path>...` classifies each path (Rust workspace,
+Node, Python, C/C++, Debian package, container image, kernel module, mixed
+monorepo — or an explicit `unrecognized`), extracts manifests and lockfiles,
+fingerprints the local state, and correlates against the snapshot: dependency
+updates (dpkg-semantic version comparison of locked vs current),
+security-review findings from advisory joins and advisory changes,
+rebuild-recommended for base images whose distro took security movements,
+informational when local already satisfies upstream, and — critically —
+**insufficient-evidence when a dependency falls outside the snapshot's
+bounded scope** (bounded truth is not proof of absence). Multiple paths get
+shared-exposure grouping. The output is an immutable, digest-bearing
+artifact referencing the snapshot, reproducible without re-collection.
+Exit code 3 signals security-review findings for pipeline use.
+
 ## The contained flow
 
 Every unit of either domain moves through the same pipeline, implemented once
@@ -249,6 +320,23 @@ POST /api/reload                                         re-read config
    cached).
 4. **Configuration over code.** Which distros, which sources, how deep, how
    fresh, and which upstream mappings are all declaration, not modification.
+
+## Development-direction status
+
+| direction item | status |
+|---|---|
+| Immutable observations with full provenance fields | implemented |
+| Deterministic change detection, observation-attributed | implemented (11 change kinds) |
+| Inflow heuristics with rule ids / confidence basis / ambiguity | implemented — 5 rules; toolchain-migration, ABI-wave, coordinated-churn, upstream-lag rules are seams on the same Rule type, not yet written |
+| Observation / churn / interpretive snapshot stages | implemented |
+| Content-addressed, schema-versioned, reproducible snapshots | implemented (digest binds content; fixed-window rebuild identity smoke-asserted) |
+| Exports: JSON, NDJSON, SQLite, bundle, Markdown, HTML from one model | implemented |
+| Explicit truth boundary (notObserved, failures, partial coverage, ambiguity) | implemented |
+| Project classes | Rust, Node, Python, C/C++, Linux package, container, kernel module, mixed monorepo, unrecognized — firmware trees and infrastructure repos classify as `unrecognized` today |
+| Dispatch findings | 6 of the listed kinds emitted; migration-likely / compatibility-review / already-mitigated need richer local analysis and are not yet emitted |
+| Dispatch artifact: immutable, snapshot-referencing, reproducible | implemented |
+| Console rendering of observations/changes/snapshots | not yet — API + CLI complete; the UI still renders current state only |
+| "Do not restrict collection to relevance" | collection is scope-bounded by config (whole archives for distros; declared sets for registries); registry-wide enumeration remains the documented scope.mode seam |
 
 ## Known limitations
 

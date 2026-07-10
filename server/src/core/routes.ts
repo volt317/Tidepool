@@ -6,8 +6,14 @@
 
 import { Router } from "express";
 import type { Aggregator } from "./aggregator.js";
+import type { InflowStore } from "./inflow.js";
+import { buildSnapshot, exportSnapshot, type ExportFormat, type SnapshotStore } from "./snapshot.js";
+import type { SnapshotStage } from "../../../shared/types.js";
 
-export function buildRouter(agg: Aggregator): Router {
+const STAGES: SnapshotStage[] = ["observation", "churn", "interpretive"];
+const FORMATS: ExportFormat[] = ["json", "ndjson", "md", "html", "sqlite", "bundle"];
+
+export function buildRouter(agg: Aggregator, inflow: InflowStore, snapshots: SnapshotStore): Router {
   const r = Router();
 
   r.get("/domains", (_req, res) => {
@@ -97,6 +103,96 @@ export function buildRouter(agg: Aggregator): Router {
         return;
       }
       res.json({ ...out.payload, cached: out.cached });
+    } catch (e) {
+      res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+    }
+  });
+
+  // ------------------------------------------------------------ inflow
+
+  r.get("/domains/:domain/units/:unit/observations", (req, res) => {
+    const p = agg.provider(req.params.domain, req.params.unit);
+    if (!p) {
+      res.status(404).json({ error: "unknown unit" });
+      return;
+    }
+    res.json({ observations: inflow.observations(p.domain, p.id) });
+  });
+
+  r.get("/domains/:domain/units/:unit/changes", (req, res) => {
+    const p = agg.provider(req.params.domain, req.params.unit);
+    if (!p) {
+      res.status(404).json({ error: "unknown unit" });
+      return;
+    }
+    res.json({ changes: inflow.changes(p.domain, p.id) });
+  });
+
+  // ---------------------------------------------------------- snapshots
+
+  r.post("/snapshots", async (req, res) => {
+    try {
+      const stage = (req.body?.stage ?? "interpretive") as SnapshotStage;
+      if (!STAGES.includes(stage)) {
+        res.status(400).json({ error: `stage must be one of ${STAGES.join(", ")}` });
+        return;
+      }
+      const windowHours = Number(req.body?.windowHours ?? 24 * 7);
+      const explicit =
+        req.body?.from && req.body?.to ? { from: Number(req.body.from), to: Number(req.body.to) } : undefined;
+      const doc = await buildSnapshot({
+        providers: agg.allProviders(),
+        inflow,
+        aggregator: agg,
+        stage,
+        windowHours,
+        window: explicit,
+      });
+      const digest = snapshots.save(doc);
+      res.status(201).json({
+        digest,
+        stage: doc.stage,
+        window: doc.window,
+        entities: doc.entities.length,
+        observations: doc.observations.length,
+        changes: doc.changes.length,
+        findings: doc.findings.length,
+        notObserved: doc.notObserved.length,
+      });
+    } catch (e) {
+      res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+    }
+  });
+
+  r.get("/snapshots", (_req, res) => {
+    res.json({ snapshots: snapshots.list() });
+  });
+
+  r.get("/snapshots/:digest", (req, res) => {
+    const doc = snapshots.load(req.params.digest);
+    if (!doc) {
+      res.status(404).json({ error: "unknown snapshot" });
+      return;
+    }
+    res.json(doc);
+  });
+
+  r.get("/snapshots/:digest/export/:format", (req, res) => {
+    const doc = snapshots.load(req.params.digest);
+    if (!doc) {
+      res.status(404).json({ error: "unknown snapshot" });
+      return;
+    }
+    const format = req.params.format as ExportFormat;
+    if (!FORMATS.includes(format)) {
+      res.status(400).json({ error: `format must be one of ${FORMATS.join(", ")}` });
+      return;
+    }
+    try {
+      const out = exportSnapshot(doc, format);
+      res.setHeader("content-type", out.contentType);
+      res.setHeader("content-disposition", `attachment; filename="${out.filename}"`);
+      res.send(out.body);
     } catch (e) {
       res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
     }

@@ -179,6 +179,47 @@ try {
     console.log("  - web/dist absent; static serving skipped");
   }
 
+  // 7) snapshot pipeline: build twice on one explicit window → identical digest;
+  //    markdown export must state the truth boundary
+  const to = Date.now();
+  const from = to - 24 * 3600 * 1000;
+  const mkSnap = async () => {
+    const r = await fetch(`${BASE}/api/snapshots`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stage: "interpretive", from, to }),
+    });
+    if (r.status !== 201) fail(`snapshot build failed: ${r.status}`);
+    return r.json();
+  };
+  const s1 = await mkSnap();
+  const s2 = await mkSnap();
+  if (s1.digest !== s2.digest) fail(`snapshot not reproducible: ${s1.digest} vs ${s2.digest}`);
+  const md = await get(`/api/snapshots/${s1.digest}/export/md`, { expectJson: false });
+  if (!String(md.body).includes("Truth boundary")) fail("snapshot markdown lacks the truth boundary section");
+  ok(`snapshot ${String(s1.digest).slice(0, 12)}: reproducible on a fixed window; ${s1.observations} obs, ${s1.changes} change(s), truth boundary exported`);
+
+  // 8) dispatch: a fixture project pinned behind upstream must yield a
+  //    dependency-update finding from the snapshot alone (no re-collection)
+  const proj = mkdtempSync(join(tmpdir(), "tidepool-smoke-proj-"));
+  writeFileSync(join(proj, "package.json"), JSON.stringify({ name: "smoke", dependencies: { express: "^4.18.0" } }));
+  writeFileSync(
+    join(proj, "package-lock.json"),
+    JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/express": { version: "4.18.0" } } })
+  );
+  const { spawnSync } = await import("node:child_process");
+  const cli = join(process.cwd(), "server", "dist", "server", "src", "cli", "dispatch.js");
+  const run = spawnSync(process.execPath, [cli, "--snapshot", s1.digest, "--store", join(root, ".cache"), proj], {
+    encoding: "utf8",
+  });
+  rmSync(proj, { recursive: true, force: true });
+  if (run.status !== 0 && run.status !== 3) fail(`dispatch CLI exit ${run.status}: ${run.stderr.slice(0, 300)}`);
+  const artifact = JSON.parse(run.stdout);
+  if (!artifact.findings.some((f) => f.kind === "dependency-update-available" && f.subject.endsWith("/express")))
+    fail(`dispatch missing expected express finding: ${JSON.stringify(artifact.findings.map((f) => f.kind))}`);
+  if (artifact.snapshotDigest !== s1.digest) fail("dispatch artifact does not reference the snapshot");
+  ok(`dispatch: dependency-update-available for express, artifact ${String(artifact.digest).slice(0, 12)} references snapshot`);
+
   console.log("SMOKE PASS");
   exitCode = 0;
 } finally {

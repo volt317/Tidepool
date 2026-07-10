@@ -9,6 +9,10 @@ import type { CodeUnitConfig, DistroConfig, PackageRow, SourceRecord, TidepoolCo
 import type { AdvisoryJoin, IndexResult, UnitProvider } from "../core/aggregator.js";
 import { mapLimit } from "../core/aggregator.js";
 import { osvBatchJoin } from "../core/enrich.js";
+import { digestOf } from "../core/inflow.js";
+
+export const DISTRO_PARSER_VERSION = "1";
+export const CODE_PARSER_VERSION = "1";
 import { syncAptIndex } from "./distro/apt.js";
 import { fetchAlpineSecdb, fetchArchAvg, syncApkIndex, syncArchIndex } from "./distro/apk_arch.js";
 import { fetchUbuntuNotices } from "./distro/advisories.js";
@@ -30,6 +34,8 @@ function distroProvider(d: DistroConfig): UnitProvider {
     kind: d.family,
     osvEcosystem: d.osvEcosystem ?? null,
     sourceOrder: distroSourceOrder(d),
+    parserVersion: DISTRO_PARSER_VERSION,
+    configVersion: digestOf(d),
     syncIndex(): Promise<IndexResult> {
       if (d.family === "apt") return syncAptIndex(d);
       if (d.family === "apk") return syncApkIndex(d);
@@ -70,6 +76,8 @@ function codeProvider(c: CodeUnitConfig): UnitProvider {
     kind: c.ecosystem,
     osvEcosystem: c.osvEcosystem ?? null,
     sourceOrder: surfaces.map((s) => s.id),
+    parserVersion: CODE_PARSER_VERSION,
+    configVersion: digestOf(c),
     async syncIndex(): Promise<IndexResult> {
       const names = [...new Set(c.scope.packages)].sort((a, b) => a.localeCompare(b));
 

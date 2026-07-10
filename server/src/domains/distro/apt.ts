@@ -55,6 +55,7 @@ async function syncPocket(
     const inReleaseUrl = `${pocket.base}/dists/${pocket.suite}/InRelease`;
     source.urls.push(inReleaseUrl);
     const inRelease = await fetchBytes(inReleaseUrl);
+    const componentDigests: string[] = [];
 
     let verification: Verification = null;
     if (verifySignatures) {
@@ -86,6 +87,7 @@ async function syncPocket(
         if (verification === null) verification = "digest";
       }
 
+      componentDigests.push(sha256hex(gz));
       const text = gunzip(gz).toString("utf8");
       for (const st of parseDeb822(text)) {
         if (!st.Package || !st.Version) continue;
@@ -104,6 +106,7 @@ async function syncPocket(
       }
     }
     source.verified = verification;
+    source.artifactDigest = componentDigests.length === 1 ? componentDigests[0] : componentDigests.join(",");
     source.status = "ok";
     source.fetchedAt = Date.now();
     source.packageCount = stanzas.length;

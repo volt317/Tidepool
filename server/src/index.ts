@@ -10,6 +10,8 @@ import { join, resolve } from "node:path";
 
 import type { TidepoolConfig } from "../../shared/types.js";
 import { Aggregator } from "./core/aggregator.js";
+import { InflowStore } from "./core/inflow.js";
+import { SnapshotStore } from "./core/snapshot.js";
 import { buildRouter } from "./core/routes.js";
 import { buildProviders } from "./domains/providers.js";
 import { DiskCache } from "./lib/util.js";
@@ -22,9 +24,12 @@ function loadConfig(): TidepoolConfig {
 
 function build(): { config: TidepoolConfig; router: express.Router } {
   const config = loadConfig();
-  const disk = new DiskCache(join(ROOT, config.server.cacheDir ?? ".cache"));
-  const agg = new Aggregator(buildProviders(config), disk, config);
-  return { config, router: buildRouter(agg) };
+  const cacheDir = join(ROOT, config.server.cacheDir ?? ".cache");
+  const disk = new DiskCache(cacheDir);
+  const inflow = new InflowStore(join(cacheDir, "history"));
+  const snapshots = new SnapshotStore(join(cacheDir, "snapshots"));
+  const agg = new Aggregator(buildProviders(config), disk, config, inflow);
+  return { config, router: buildRouter(agg, inflow, snapshots) };
 }
 
 let current = build();

@@ -26,6 +26,13 @@ import type {
 import type { DiskCache } from "../lib/util.js";
 import { debCompare } from "../lib/util.js";
 import { eolForSlug, githubReleases, osvForPackage, type EnrichRecordT } from "./enrich.js";
+import {
+  detectChanges,
+  makeObservation,
+  type AdvisoryRecordLite,
+  type IndexRecordLite,
+  type InflowStore,
+} from "./inflow.js";
 
 export interface IndexResult {
   sources: SourceRecord[];
@@ -45,6 +52,10 @@ export interface UnitProvider {
   kind: string;
   osvEcosystem: string | null;
   sourceOrder: string[];
+  /** bumped when a domain's normalization logic changes */
+  parserVersion: string;
+  /** digest of this unit's configuration block */
+  configVersion: string;
   syncIndex(): Promise<IndexResult>;
   syncAdvisories(): Promise<AdvisoryJoin>;
 }
@@ -96,10 +107,116 @@ export class Aggregator {
   private disk: DiskCache;
   private config: TidepoolConfig;
 
-  constructor(providers: UnitProvider[], disk: DiskCache, config: TidepoolConfig) {
+  private inflow: InflowStore;
+
+  constructor(providers: UnitProvider[], disk: DiskCache, config: TidepoolConfig, inflow: InflowStore) {
     this.disk = disk;
     this.config = config;
+    this.inflow = inflow;
     for (const p of providers) this.providers.set(key(p.domain, p.id), p);
+  }
+
+  allProviders(): UnitProvider[] {
+    return [...this.providers.values()];
+  }
+
+  /** Current state without EVER fetching: memory if ready, else disk cache
+   *  ignoring TTL. Snapshot building must stay store-only. */
+  peek(p: UnitProvider): UnitState | null {
+    const st = this.states.get(key(p.domain, p.id));
+    if (st && st.status === "ready") return st;
+    const cached = this.disk.get<IndexCachePayload>(`index-${key(p.domain, p.id)}`, null);
+    const cachedAdv = this.disk.get<AdvisoryCachePayload>(`advisories-${key(p.domain, p.id)}`, null);
+    if (!cached) return null;
+    return {
+      status: "ready",
+      startedAt: null,
+      finishedAt: cached.savedAt,
+      sources: [...cached.data.sources, ...(cachedAdv ? [cachedAdv.data.source] : [])],
+      packages: cached.data.packages,
+      advisoriesByPackage: cachedAdv?.data.byPackage ?? {},
+      error: null,
+    };
+  }
+
+  /** Derive per-source normalized records generically from the merged state:
+   *  index sources project their versions column; advisory sources flatten
+   *  their byPackage join. Deterministic and collector-agnostic. */
+  private sourceRecords(
+    source: SourceRecord,
+    packages: PackageRow[],
+    byPackage: Record<string, JoinedAdvisory[]>
+  ): { records: IndexRecordLite[] | AdvisoryRecordLite[]; kind: "index" | "advisory" } {
+    if (source.id.startsWith("advisories:")) {
+      const records: AdvisoryRecordLite[] = [];
+      for (const [pkg, advs] of Object.entries(byPackage)) {
+        for (const a of advs) {
+          records.push({
+            package: pkg,
+            id: a.id,
+            fingerprint: JSON.stringify([a.title ?? "", a.severity ?? "", a.fixedIn ?? "", (a.cves ?? []).join(",")]),
+          });
+        }
+      }
+      records.sort((x, y) => (x.package + x.id).localeCompare(y.package + y.id));
+      return { records, kind: "advisory" };
+    }
+    const suffix = source.id.includes(":") ? source.id.slice(source.id.indexOf(":") + 1) : source.id;
+    const keys = [suffix, suffix.toLowerCase()];
+    const records: IndexRecordLite[] = [];
+    for (const row of packages) {
+      const k2 = keys.find((k3) => row.versions[k3]);
+      if (!k2) continue;
+      records.push({
+        name: row.name,
+        version: row.versions[k2],
+        meta: `${row.component ?? ""}|${row.section ?? ""}`,
+      });
+    }
+    records.sort((x, y) => x.name.localeCompare(y.name));
+    return { records, kind: "index" };
+  }
+
+  /** Append one immutable observation per source and detect changes against
+   *  the previous observation of that source. Never mutates prior history. */
+  private recordInflow(
+    p: UnitProvider,
+    sources: SourceRecord[],
+    packages: PackageRow[],
+    byPackage: Record<string, JoinedAdvisory[]>,
+    collectedAt: number
+  ): void {
+    for (const source of sources) {
+      const { records, kind } = this.sourceRecords(source, packages, byPackage);
+      const effective = source.status === "ok" ? records : [];
+      const blob = this.inflow.putRecords(effective);
+      const limitations: string[] = [];
+      if (source.note) limitations.push(source.note);
+      const fields = {
+        domain: p.domain,
+        unit: p.id,
+        authority: p.label,
+        sourceId: source.id,
+        collectedAt,
+        scope: source.label,
+        verification: source.verified ?? null,
+        signedBy: source.signedBy,
+        status: (source.status === "ok" ? "ok" : "error") as "ok" | "error",
+        error: source.error ?? null,
+        coverage: { observed: blob.count, limitations },
+        artifactDigest: source.artifactDigest ?? null,
+        parserVersion: p.parserVersion,
+        configVersion: p.configVersion,
+        recordsDigest: blob.digest,
+        recordCount: blob.count,
+      };
+      const prev = this.inflow.previousOf(fields);
+      const obs = makeObservation(fields);
+      this.inflow.appendObservation(obs);
+      const prevRecords = prev ? this.inflow.getRecords(prev.recordsDigest) ?? [] : [];
+      const changes = detectChanges(prev, obs, prevRecords, effective, kind);
+      this.inflow.appendChanges(p.domain, p.id, changes);
+    }
   }
 
   private indexTtl(): number {
@@ -177,6 +294,8 @@ export class Aggregator {
       st.status = index.sources.some((s) => s.status === "ok") ? "ready" : "error";
       if (st.status === "error") st.error = "no index source succeeded — see per-source errors";
       st.finishedAt = Date.now();
+      // inflow: every real collection becomes immutable observations + changes
+      this.recordInflow(p, [...index.sources, adv.source], index.packages, adv.byPackage, st.finishedAt);
       this.disk.set<IndexCachePayload>(`index-${k}`, { sources: index.sources, packages: index.packages });
       this.disk.set<AdvisoryCachePayload>(`advisories-${k}`, { source: adv.source, byPackage: adv.byPackage });
     } catch (e) {

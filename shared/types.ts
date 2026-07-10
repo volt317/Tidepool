@@ -23,6 +23,8 @@ export interface SourceRecord {
   verified?: Verification;
   /** e.g. gpgv "Good signature from …" identities, when signature-verified */
   signedBy?: string[];
+  /** digest of the raw fetched artifact backing this source, when it has one */
+  artifactDigest?: string | null;
   error?: string | null;
   note?: string;
   fetchedAt?: number | null;
@@ -268,4 +270,212 @@ export interface TidepoolConfig {
     githubToken?: string;
   };
   packageHints?: Record<string, PackageHints>;
+}
+
+// ============================================================ inflow model
+
+/** An immutable record of one collection act against one source. */
+export interface Observation {
+  /** content address over (unit, source, collectedAt, recordsDigest, …) */
+  id: string;
+  domain: DomainId;
+  unit: string;
+  /** the authority as configured (unit label) */
+  authority: string;
+  /** source within the unit, e.g. "pocket:security", "surface:api" */
+  sourceId: string;
+  collectedAt: number;
+  /** human-readable observation scope, e.g. "noble-security main/amd64" */
+  scope: string;
+  verification: Verification;
+  signedBy?: string[];
+  status: "ok" | "error";
+  error?: string | null;
+  coverage: {
+    observed: number;
+    limitations: string[];
+  };
+  /** digest of the raw fetched artifact when the source has one */
+  artifactDigest: string | null;
+  parserVersion: string;
+  /** digest of the unit's configuration block at collection time */
+  configVersion: string;
+  /** content address of the normalized records blob (records/<digest>.json) */
+  recordsDigest: string;
+  recordCount: number;
+}
+
+export type ChangeKind =
+  | "package-added"
+  | "package-removed"
+  | "version-moved"
+  | "metadata-changed"
+  | "advisory-published"
+  | "advisory-modified"
+  | "advisory-withdrawn"
+  | "source-failure"
+  | "source-recovery"
+  | "verification-transition"
+  | "signer-transition";
+
+/** A deterministic difference between two observations of the same source. */
+export interface ChangeRecord {
+  id: string;
+  domain: DomainId;
+  unit: string;
+  sourceId: string;
+  kind: ChangeKind;
+  package?: string;
+  from?: string | null;
+  to?: string | null;
+  detail?: string;
+  fromObservation: string | null;
+  toObservation: string;
+  detectedAt: number;
+}
+
+// ===================================================== inflow heuristics
+
+export interface HeuristicFinding {
+  ruleId: string;
+  title: string;
+  severityHint: "info" | "notable" | "attention";
+  summary: string;
+  /** what the confidence rests on */
+  confidenceBasis: string;
+  confidence: number; // 0..1
+  subjects: string[]; // units and/or packages
+  evidence: {
+    observations: string[];
+    changes: string[];
+  };
+  ambiguities: string[];
+}
+
+// ============================================================== snapshots
+
+export type SnapshotStage = "observation" | "churn" | "interpretive";
+
+export interface SnapshotEntity {
+  domain: DomainId;
+  unit: string;
+  name: string;
+  source: string;
+  versions: Record<string, string>;
+  current: string | null;
+  drift: boolean;
+  advisoryCount: number;
+}
+
+export interface SnapshotSourceCoverage {
+  domain: DomainId;
+  unit: string;
+  authority: string;
+  sourceId: string;
+  status: "ok" | "error" | "unobserved";
+  verification: Verification;
+  signedBy?: string[];
+  recordCount: number;
+  collectedAt: number | null;
+  error?: string | null;
+  limitations: string[];
+}
+
+export interface SnapshotDoc {
+  schema: "tidepool-snapshot-v1";
+  stage: SnapshotStage;
+  generatorVersion: string;
+  createdAt: number;
+  scope: {
+    domains: DomainId[];
+    units: string[];
+  };
+  window: { from: number; to: number };
+  authorities: string[];
+  coverage: SnapshotSourceCoverage[];
+  /** explicit truth boundary */
+  notObserved: string[];
+  entities: SnapshotEntity[];
+  observations: Observation[];
+  changes: ChangeRecord[];
+  relationships: { kind: string; a: string; b: string; rationale: string }[];
+  findings: HeuristicFinding[];
+  ambiguities: string[];
+  /** filled after digesting */
+  digest?: string;
+}
+
+// =============================================================== dispatch
+
+export type ProjectClass =
+  | "rust-workspace"
+  | "node-project"
+  | "python-project"
+  | "c-cpp-project"
+  | "linux-package"
+  | "container-image"
+  | "kernel-module"
+  | "mixed-monorepo"
+  | "unrecognized";
+
+export interface ProjectDependency {
+  ecosystem: string; // maps to a code unit kind or distro
+  name: string;
+  /** locked or pinned version when known */
+  version: string | null;
+  origin: string; // which manifest/lockfile declared it
+}
+
+export interface ProjectProfile {
+  path: string;
+  classes: ProjectClass[];
+  languages: string[];
+  buildSystems: string[];
+  manifests: string[];
+  dependencies: ProjectDependency[];
+  baseImages: { image: string; unit: string | null }[];
+  fingerprint: string;
+}
+
+export type DispatchFindingKind =
+  | "no-relevant-upstream-change"
+  | "informational-upstream-change"
+  | "dependency-update-available"
+  | "rebuild-recommended"
+  | "retest-recommended"
+  | "compatibility-review-required"
+  | "security-review-required"
+  | "insufficient-evidence";
+
+export interface DispatchFinding {
+  path: string;
+  kind: DispatchFindingKind;
+  subject: string;
+  summary: string;
+  confidence: number;
+  confidenceBasis: string;
+  evidence: {
+    snapshotEntities: string[];
+    changes: string[];
+    localOrigins: string[];
+  };
+  recommendedAction: string;
+}
+
+export interface DispatchArtifact {
+  schema: "tidepool-dispatch-v1";
+  createdAt: number;
+  snapshotDigest: string;
+  snapshotWindow: { from: number; to: number };
+  targets: ProjectProfile[];
+  findings: DispatchFinding[];
+  sharedExposure: {
+    ecosystem: string;
+    name: string;
+    paths: string[];
+    rationale: string;
+  }[];
+  ambiguities: string[];
+  analyzerVersions: Record<string, string>;
+  digest?: string;
 }
