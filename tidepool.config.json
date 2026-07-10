@@ -254,6 +254,31 @@
     },
     "ggplot2": {
       "github": "tidyverse/ggplot2"
+    },
+    "zlib": {
+      "github": "madler/zlib"
+    },
+    "fmt": {
+      "github": "fmtlib/fmt"
+    },
+    "spdlog": {
+      "github": "gabime/spdlog"
+    },
+    "protobuf": {
+      "github": "protocolbuffers/protobuf",
+      "eol": "protobuf"
+    },
+    "boost": {
+      "github": "boostorg/boost"
+    },
+    "nlohmann_json": {
+      "github": "nlohmann/json"
+    },
+    "nlohmann-json": {
+      "github": "nlohmann/json"
+    },
+    "libpng": {
+      "github": "pnggroup/libpng"
     }
   },
   "ecosystems": [
@@ -486,6 +511,51 @@
           "curl",
           "jsonlite",
           "httr2"
+        ]
+      }
+    },
+    {
+      "id": "conan",
+      "label": "ConanCenter (C/C++)",
+      "ecosystem": "conan",
+      "enabled": true,
+      "osvEcosystem": "ConanCenter",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "zlib",
+          "openssl",
+          "boost",
+          "fmt",
+          "libcurl",
+          "sqlite3",
+          "protobuf",
+          "spdlog",
+          "nlohmann_json",
+          "libpng"
+        ]
+      }
+    },
+    {
+      "id": "vcpkg",
+      "label": "vcpkg (C/C++)",
+      "ecosystem": "vcpkg",
+      "enabled": true,
+      "$comment.osv": "vcpkg has no OSV ecosystem; advisories reach C/C++ packages via ConanCenter and the distro domain.",
+      "osvEcosystem": null,
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "zlib",
+          "openssl",
+          "boost",
+          "fmt",
+          "curl",
+          "sqlite3",
+          "protobuf",
+          "spdlog",
+          "nlohmann-json",
+          "libpng"
         ]
       }
     }

@@ -227,7 +227,9 @@ export type CodeEcosystem =
   | "packagist"
   | "hex"
   | "pub"
-  | "cran";
+  | "cran"
+  | "conan"
+  | "vcpkg";
 
 export interface CodeScope {
   /** "list" = the explicit package set below. The seam is deliberate:

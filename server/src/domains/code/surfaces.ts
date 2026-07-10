@@ -27,6 +27,12 @@
 //   Hex       : "api"       hex.pm/api/packages/{name}         (single surface)
 //   pub.dev   : "api"       pub.dev/api/packages/{name}        (single surface)
 //   CRAN      : "description" cran.r-project.org/web/packages/{name}/DESCRIPTION
+//   Conan     : "center2"   center2.conan.io v2 search   (current remote)
+//               "legacy"    center.conan.io v1 search    (frozen remote)
+//   vcpkg     : "versions-db" raw vcpkg repo versions/{x}-/{port}.json
+//               "manifest"    raw vcpkg repo ports/{port}/vcpkg.json
+//               (vcpkg policy REQUIRES these two to agree — drift here is a
+//               genuine repo inconsistency, exactly what vcpkg CI polices)
 //
 // Note the honesty gradient: crates.io and PyPI expose two genuinely distinct
 // serving paths; npm's two are different representations from one backend —
@@ -443,6 +449,102 @@ const cranDescription: Surface = {
   },
 };
 
+// ------------------------------------------------------------------ Conan
+// ConanCenter search is pattern-based; results are "name/version" refs,
+// filtered to the exact recipe name client-side. Two remotes exist: the
+// current center2.conan.io and the frozen legacy center.conan.io —
+// comparing a live remote against a frozen one is itself informative.
+
+function conanLatest(results: string[], name: string): string | null {
+  const versions = results
+    .filter((r) => r.startsWith(`${name}/`))
+    .map((r) => r.slice(name.length + 1))
+    .filter(Boolean);
+  if (versions.length === 0) return null;
+  const finals = versions.filter((v) => !/[a-z]/i.test(v.replace(/^cci\./, "")) || /^\d/.test(v));
+  const pool = finals.length ? finals : versions;
+  return pool.reduce((a, b) => (debCompare(a, b) >= 0 ? a : b));
+}
+
+const conanCenter2: Surface = {
+  id: "center2",
+  label: "ConanCenter remote (center2, current)",
+  urlTemplate: "https://center2.conan.io/v2/conans/search?q={name}",
+  async fetch(name) {
+    const d = await fetchJson<{ results?: string[] }>(
+      `https://center2.conan.io/v2/conans/search?q=${encodeURIComponent(name)}`
+    );
+    const v = conanLatest(d.results ?? [], name);
+    return v ? { version: v } : { version: null, note: "no matching recipe" };
+  },
+};
+
+const conanLegacy: Surface = {
+  id: "legacy",
+  label: "ConanCenter legacy remote (frozen)",
+  urlTemplate: "https://center.conan.io/v1/conans/search?q={name}",
+  async fetch(name) {
+    const d = await fetchJson<{ results?: string[] }>(
+      `https://center.conan.io/v1/conans/search?q=${encodeURIComponent(name)}`
+    );
+    const v = conanLatest(d.results ?? [], name);
+    return v ? { version: v } : { version: null, note: "no matching recipe" };
+  },
+};
+
+// ------------------------------------------------------------------ vcpkg
+// Two authoritative records inside the vcpkg registry repository. The
+// versions database's top entry MUST equal the port manifest (enforced by
+// vcpkg's own CI), so cross-surface drift is a real inconsistency, not lag.
+// The full vcpkg version is "{version}#{port-version}" when port-version > 0.
+
+interface VcpkgVersionFields {
+  version?: string;
+  "version-semver"?: string;
+  "version-string"?: string;
+  "version-date"?: string;
+  "port-version"?: number;
+}
+
+function vcpkgVersion(e: VcpkgVersionFields): string | null {
+  const v = e.version ?? e["version-semver"] ?? e["version-string"] ?? e["version-date"];
+  if (!v) return null;
+  const pv = e["port-version"] ?? 0;
+  return pv > 0 ? `${v}#${pv}` : v;
+}
+
+const VCPKG_RAW = "https://raw.githubusercontent.com/microsoft/vcpkg/master";
+
+const vcpkgVersionsDb: Surface = {
+  id: "versions-db",
+  label: "vcpkg versions database",
+  urlTemplate: `${VCPKG_RAW}/versions/{x}-/{port}.json`,
+  async fetch(name) {
+    const res = await timedFetch(`${VCPKG_RAW}/versions/${name[0].toLowerCase()}-/${name.toLowerCase()}.json`);
+    if (res.status === 404) return { version: null, note: "port not in versions database" };
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = (await res.json()) as { versions?: VcpkgVersionFields[] };
+    const top = d.versions?.[0];
+    if (!top) return { version: null, note: "empty versions list" };
+    // top entry is the current version by vcpkg policy
+    return { version: vcpkgVersion(top) };
+  },
+};
+
+const vcpkgManifest: Surface = {
+  id: "manifest",
+  label: "vcpkg port manifest",
+  urlTemplate: `${VCPKG_RAW}/ports/{port}/vcpkg.json`,
+  async fetch(name) {
+    const res = await timedFetch(`${VCPKG_RAW}/ports/${name.toLowerCase()}/vcpkg.json`);
+    if (res.status === 404) return { version: null, note: "no such port" };
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = (await res.json()) as VcpkgVersionFields & { description?: string | string[]; homepage?: string };
+    const desc = Array.isArray(d.description) ? d.description[0] : d.description;
+    return { version: vcpkgVersion(d), description: desc ?? null, homepage: d.homepage ?? null };
+  },
+};
+
 // ----------------------------------------------------------------- lookup
 
 export const SURFACES: Record<CodeEcosystem, Surface[]> = {
@@ -457,4 +559,6 @@ export const SURFACES: Record<CodeEcosystem, Surface[]> = {
   hex: [hexApi],
   pub: [pubApi],
   cran: [cranDescription],
+  conan: [conanCenter2, conanLegacy],
+  vcpkg: [vcpkgVersionsDb, vcpkgManifest],
 };

@@ -77,12 +77,18 @@ like pockets:
 | Hex (Elixir) | hex.pm API — single surface (repo endpoints are signed protobuf) | `Hex` |
 | pub.dev (Dart) | pub.dev API — single surface | `Pub` |
 | CRAN (R) | package DESCRIPTION file — single surface | `CRAN` |
+| ConanCenter (C/C++) | **current remote `center2.conan.io` · frozen legacy remote** | `ConanCenter` |
+| vcpkg (C/C++) | **versions database · port manifest** (vcpkg policy requires these to agree — drift is a genuine repo inconsistency) | — |
 
 Advisory joins are one OSV `querybatch` per unit for the whole scope.
 
 Where surfaces disagree — CDN staleness, yank propagation, search-index lag
-(Maven's is famous), mirror lag — that is drift, surfaced identically to
-pocket drift. The honesty gradient is stated in the surface labels: Maven's
+(Maven's is famous), mirror lag, or vcpkg's versions-db falling out of step
+with a port manifest — that is drift, surfaced identically to pocket drift.
+C/C++ deserves one framing note: its registry of record has historically been
+the system package manager, so the distro domain already covers it; the
+ConanCenter and vcpkg units add the dedicated C/C++ package-manager view on
+top. The honesty gradient is stated in the surface labels: Maven's
 two are genuinely separate services, npm's yarnpkg surface is a real
 cross-host mirror, while npm's own pair and RubyGems' pair are different
 resources of one backend; Hex, pub.dev, and CRAN expose one practical read
@@ -254,8 +260,9 @@ POST /api/reload                                         re-read config
   pockets, GPG + digest), crates.io (both surfaces), PyPI (both), npm (all
   three including the yarnpkg mirror). The remaining defaults — Debian,
   Alpine, Arch mirrors; RubyGems, Maven, Go proxy, NuGet, Packagist, Hex,
-  pub.dev, CRAN — are written to their documented protocols but were not
-  reachable from the build environment; any that has drifted will show a
+  pub.dev, CRAN, ConanCenter — are written to their documented protocols but
+  were not reachable from the build environment (vcpkg's two surfaces WERE
+  live-verified, via the raw vcpkg repository); any that has drifted will show a
   visible per-source error with its URL, and the fix is a config edit.
 - Ubuntu binary↔source advisory joins use the names the USN feed provides; a
   notice naming only source packages joins on the source name.
