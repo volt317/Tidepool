@@ -1,12 +1,25 @@
 {
   "name": "tidepool-web",
   "private": true,
-  "version": "0.1.0",
-  "description": "Tidepool — distro-first change intelligence service: comprehensive per-distro package lists aggregated from each distro's information sources.",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Tidepool — distro-first change intelligence service (TypeScript): comprehensive per-distro package lists aggregated from each distro's information sources, GPG-verified where the distro signs.",
   "scripts": {
-    "dev:server": "node server/index.js",
+    "build:server": "tsc -p server",
+    "build:web": "npm --prefix web run build",
+    "build": "npm run build:server && npm run build:web",
+    "typecheck": "tsc -p server --noEmit && tsc -p web",
+    "lint": "eslint .",
+    "dev:server": "npm run build:server && node server/dist/server/src/index.js",
     "dev:web": "npm --prefix web run dev",
-    "build": "npm --prefix web run build",
-    "start": "TIDEPOOL_SERVE_STATIC=1 node server/index.js"
+    "start": "TIDEPOOL_SERVE_STATIC=1 node server/dist/server/src/index.js"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.0.0"
   }
 }
