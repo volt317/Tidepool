@@ -1,0 +1,12 @@
+{
+  "name": "tidepool-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tidepool — distro-first change intelligence service: comprehensive per-distro package lists aggregated from each distro's information sources.",
+  "scripts": {
+    "dev:server": "node server/index.js",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "start": "TIDEPOOL_SERVE_STATIC=1 node server/index.js"
+  }
+}

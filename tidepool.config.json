@@ -1,0 +1,117 @@
+{
+  "$comment": "Tidepool service configuration. Everything the collectors do is declared here: which distros, which of their information sources, how much to pull, and how long to trust it. Edit and restart (or POST /api/reload).",
+
+  "server": {
+    "port": 8747,
+    "cacheDir": ".cache",
+    "$comment.ttl": "How long a synced index is trusted before a new sync is required.",
+    "indexTtlHours": 6,
+    "advisoryTtlHours": 2
+  },
+
+  "distros": [
+    {
+      "id": "ubuntu-noble",
+      "label": "Ubuntu 24.04 LTS",
+      "codename": "noble",
+      "family": "apt",
+      "enabled": true,
+      "index": {
+        "$comment": "Each pocket is an independent information source; per-package version drift across pockets is part of the intelligence. verifyDigests checks Packages.gz against the signed InRelease table and fails closed per-source.",
+        "pockets": [
+          { "id": "release",  "base": "https://archive.ubuntu.com/ubuntu",  "suite": "noble" },
+          { "id": "updates",  "base": "https://archive.ubuntu.com/ubuntu",  "suite": "noble-updates" },
+          { "id": "security", "base": "https://security.ubuntu.com/ubuntu", "suite": "noble-security" }
+        ],
+        "components": ["main"],
+        "arch": "amd64",
+        "verifyDigests": true
+      },
+      "advisories": {
+        "kind": "ubuntu-notices",
+        "url": "https://ubuntu.com/security/notices.json",
+        "release": "noble",
+        "$comment.pages": "How many pages (100 notices each, newest first) of the USN feed to join against the package list.",
+        "pages": 5
+      },
+      "osvEcosystem": "Ubuntu:24.04:LTS"
+    },
+    {
+      "id": "debian-bookworm",
+      "label": "Debian 12",
+      "codename": "bookworm",
+      "family": "apt",
+      "enabled": true,
+      "index": {
+        "pockets": [
+          { "id": "release",  "base": "https://deb.debian.org/debian",           "suite": "bookworm" },
+          { "id": "updates",  "base": "https://deb.debian.org/debian",           "suite": "bookworm-updates" },
+          { "id": "security", "base": "https://security.debian.org/debian-security", "suite": "bookworm-security" }
+        ],
+        "components": ["main"],
+        "arch": "amd64",
+        "verifyDigests": true
+      },
+      "advisories": { "kind": "osv-on-demand" },
+      "osvEcosystem": "Debian:12"
+    },
+    {
+      "id": "alpine-3.20",
+      "label": "Alpine 3.20",
+      "family": "apk",
+      "enabled": true,
+      "index": {
+        "base": "https://dl-cdn.alpinelinux.org/alpine/v3.20",
+        "repos": ["main"],
+        "arch": "x86_64"
+      },
+      "advisories": {
+        "kind": "alpine-secdb",
+        "$comment": "Alpine's own security database — small enough to join in full.",
+        "urls": ["https://secdb.alpinelinux.org/v3.20/main.json"]
+      },
+      "osvEcosystem": "Alpine:v3.20"
+    },
+    {
+      "id": "arch",
+      "label": "Arch Linux",
+      "family": "arch",
+      "enabled": true,
+      "index": {
+        "api": "https://archlinux.org/packages/search/json/",
+        "repos": ["Core", "Extra"],
+        "$comment.maxPagesPerRepo": "Arch's JSON API paginates at 250/page; Extra alone is ~40+ pages. Raise to take all of it.",
+        "maxPagesPerRepo": 60
+      },
+      "advisories": {
+        "kind": "arch-avg",
+        "$comment": "Arch Vulnerability Group feed. If this endpoint moves, adjust here; failures are shown per-source in the UI, never hidden.",
+        "url": "https://security.archlinux.org/issues/all.json"
+      },
+      "osvEcosystem": null
+    }
+  ],
+
+  "enrichment": {
+    "$comment": "On-demand per-package drill-in sources (fetched when a package is opened, cached briefly).",
+    "osv": true,
+    "endoflife": true,
+    "github": true,
+    "$comment.githubToken": "Optional. Raises api.github.com anonymous limits. Or set env TIDEPOOL_GITHUB_TOKEN.",
+    "githubToken": ""
+  },
+
+  "packageHints": {
+    "$comment": "Optional upstream mappings, keyed by source-package name. Anything not listed still enriches via OSV; these add GitHub releases and endoflife.date lifecycle.",
+    "openssl":  { "github": "openssl/openssl",          "eol": "openssl" },
+    "curl":     { "github": "curl/curl",                "eol": "curl" },
+    "openssh":  { "github": "openssh/openssh-portable" },
+    "sudo":     { "github": "sudo-project/sudo" },
+    "systemd":  { "github": "systemd/systemd" },
+    "nginx":    { "github": "nginx/nginx",              "eol": "nginx" },
+    "glibc":    { "eol": "glibc" },
+    "linux":    { "eol": "linux" },
+    "postgresql-16": { "github": "postgres/postgres",   "eol": "postgresql" },
+    "docker.io": { "eol": "docker-engine" }
+  }
+}
