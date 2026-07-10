@@ -209,6 +209,51 @@
     "numpy": {
       "github": "numpy/numpy",
       "eol": "numpy"
+    },
+    "rails": {
+      "github": "rails/rails",
+      "eol": "rails"
+    },
+    "nokogiri": {
+      "github": "sparklemotion/nokogiri"
+    },
+    "org.springframework:spring-core": {
+      "github": "spring-projects/spring-framework",
+      "eol": "spring-framework"
+    },
+    "org.apache.logging.log4j:log4j-core": {
+      "github": "apache/logging-log4j2",
+      "eol": "log4j"
+    },
+    "com.fasterxml.jackson.core:jackson-databind": {
+      "github": "FasterXML/jackson-databind"
+    },
+    "golang.org/x/crypto": {
+      "github": "golang/crypto"
+    },
+    "github.com/gin-gonic/gin": {
+      "github": "gin-gonic/gin"
+    },
+    "k8s.io/client-go": {
+      "github": "kubernetes/client-go",
+      "eol": "kubernetes"
+    },
+    "Newtonsoft.Json": {
+      "github": "JamesNK/Newtonsoft.Json"
+    },
+    "laravel/framework": {
+      "github": "laravel/framework",
+      "eol": "laravel"
+    },
+    "symfony/http-foundation": {
+      "github": "symfony/http-foundation",
+      "eol": "symfony"
+    },
+    "phoenix": {
+      "github": "phoenixframework/phoenix"
+    },
+    "ggplot2": {
+      "github": "tidyverse/ggplot2"
     }
   },
   "ecosystems": [
@@ -282,6 +327,165 @@
           "minimist",
           "undici",
           "koa"
+        ]
+      }
+    },
+    {
+      "id": "rubygems",
+      "label": "RubyGems (Ruby)",
+      "ecosystem": "rubygems",
+      "enabled": true,
+      "osvEcosystem": "RubyGems",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "rails",
+          "rack",
+          "nokogiri",
+          "devise",
+          "puma",
+          "sidekiq",
+          "json",
+          "rexml",
+          "bundler",
+          "jwt"
+        ]
+      }
+    },
+    {
+      "id": "maven",
+      "label": "Maven Central (JVM)",
+      "ecosystem": "maven",
+      "enabled": true,
+      "osvEcosystem": "Maven",
+      "$comment.names": "Maven package names are group:artifact.",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "org.springframework:spring-core",
+          "com.fasterxml.jackson.core:jackson-databind",
+          "org.apache.logging.log4j:log4j-core",
+          "com.google.guava:guava",
+          "org.apache.commons:commons-lang3",
+          "io.netty:netty-handler",
+          "org.yaml:snakeyaml",
+          "org.apache.tomcat.embed:tomcat-embed-core"
+        ]
+      }
+    },
+    {
+      "id": "go",
+      "label": "Go modules",
+      "ecosystem": "go",
+      "enabled": true,
+      "osvEcosystem": "Go",
+      "$comment.names": "Go package names are module paths.",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "golang.org/x/crypto",
+          "golang.org/x/net",
+          "github.com/gin-gonic/gin",
+          "google.golang.org/grpc",
+          "github.com/prometheus/client_golang",
+          "k8s.io/client-go",
+          "github.com/spf13/cobra",
+          "gopkg.in/yaml.v3"
+        ]
+      }
+    },
+    {
+      "id": "nuget",
+      "label": "NuGet (.NET)",
+      "ecosystem": "nuget",
+      "enabled": true,
+      "osvEcosystem": "NuGet",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "Newtonsoft.Json",
+          "System.Text.Json",
+          "Serilog",
+          "Dapper",
+          "NLog",
+          "Polly",
+          "AutoMapper",
+          "Moq"
+        ]
+      }
+    },
+    {
+      "id": "packagist",
+      "label": "Packagist (PHP)",
+      "ecosystem": "packagist",
+      "enabled": true,
+      "osvEcosystem": "Packagist",
+      "$comment.names": "Packagist package names are vendor/package.",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "symfony/http-foundation",
+          "laravel/framework",
+          "guzzlehttp/guzzle",
+          "monolog/monolog",
+          "phpunit/phpunit",
+          "twig/twig",
+          "doctrine/orm",
+          "composer/composer"
+        ]
+      }
+    },
+    {
+      "id": "hex",
+      "label": "Hex (Elixir)",
+      "ecosystem": "hex",
+      "enabled": true,
+      "osvEcosystem": "Hex",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "phoenix",
+          "ecto",
+          "plug",
+          "jason",
+          "cowboy",
+          "telemetry"
+        ]
+      }
+    },
+    {
+      "id": "pub",
+      "label": "pub.dev (Dart)",
+      "ecosystem": "pub",
+      "enabled": true,
+      "osvEcosystem": "Pub",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "http",
+          "provider",
+          "dio",
+          "path",
+          "collection",
+          "flutter_bloc"
+        ]
+      }
+    },
+    {
+      "id": "cran",
+      "label": "CRAN (R)",
+      "ecosystem": "cran",
+      "enabled": true,
+      "osvEcosystem": "CRAN",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "ggplot2",
+          "dplyr",
+          "data.table",
+          "curl",
+          "jsonlite",
+          "httr2"
         ]
       }
     }

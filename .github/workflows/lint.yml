@@ -1,0 +1,42 @@
+# Linting gate: ESLint (flat config, typescript-eslint + react-hooks) and the
+# TypeScript compiler across server, shared, and web. Both must be clean —
+# these are the same `npm run lint` / `npm run typecheck` gates documented in
+# the README, so CI and a local checkout can never disagree about "clean".
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: eslint + typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            web/package-lock.json
+
+      - name: Install (root tooling, server, web)
+        run: |
+          npm ci
+          npm ci --prefix server
+          npm ci --prefix web
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: TypeScript
+        run: npm run typecheck

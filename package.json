@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.2.0",
   "type": "module",
-  "description": "Tidepool — distro-first change intelligence service (TypeScript): comprehensive per-distro package lists aggregated from each distro's information sources, GPG-verified where the distro signs.",
+  "description": "Tidepool \u2014 distro-first change intelligence service (TypeScript): comprehensive per-distro package lists aggregated from each distro's information sources, GPG-verified where the distro signs.",
   "scripts": {
     "build:server": "tsc -p server",
     "build:web": "npm --prefix web run build",
@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "dev:server": "npm run build:server && node server/dist/server/src/index.js",
     "dev:web": "npm --prefix web run dev",
-    "start": "TIDEPOOL_SERVE_STATIC=1 node server/dist/server/src/index.js"
+    "start": "TIDEPOOL_SERVE_STATIC=1 node server/dist/server/src/index.js",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

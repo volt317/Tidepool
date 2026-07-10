@@ -216,7 +216,18 @@ export interface DistroConfig {
 
 // ---------------------------------------------------- code-ecosystem units
 
-export type CodeEcosystem = "crates-io" | "pypi" | "npm";
+export type CodeEcosystem =
+  | "crates-io"
+  | "pypi"
+  | "npm"
+  | "rubygems"
+  | "maven"
+  | "go"
+  | "nuget"
+  | "packagist"
+  | "hex"
+  | "pub"
+  | "cran";
 
 export interface CodeScope {
   /** "list" = the explicit package set below. The seam is deliberate:

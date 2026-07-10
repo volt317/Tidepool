@@ -1,0 +1,90 @@
+# Build + runtime smoke.
+#
+# build: compiles the server (tsc → server/dist) and the console
+#        (vite → web/dist) and uploads both as one artifact.
+#
+# smoke: downloads that artifact and runs scripts/smoke.mjs — boots the built
+#        service against a minimal dedicated config and asserts, live:
+#        the API lists both domains; a real apt pocket syncs with the full
+#        verification chain (gpgv signature + digest, fail-closed); an npm
+#        scope resolves on all three surfaces including the cross-host
+#        yarnpkg mirror; search returns per-source versions; and the built
+#        frontend is served. Advisory/enrichment sources are disabled in the
+#        smoke config, so only security.ubuntu.com and the npm registries —
+#        all highly available — can affect the verdict.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: compile server + web
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            web/package-lock.json
+
+      - name: Install (root tooling, server, web)
+        run: |
+          npm ci
+          npm ci --prefix server
+          npm ci --prefix web
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload built service
+        uses: actions/upload-artifact@v4
+        with:
+          name: tidepool-dist
+          path: |
+            server/dist
+            web/dist
+          retention-days: 7
+          if-no-files-found: error
+
+  smoke:
+    name: runtime smoke (live)
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Download built service
+        uses: actions/download-artifact@v4
+        with:
+          name: tidepool-dist
+
+      - name: Install server runtime deps
+        run: npm ci --prefix server --omit=dev
+
+      - name: Ensure gpgv and the Ubuntu archive keyring
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gpgv ubuntu-keyring
+          test -f /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+      - name: Smoke
+        run: npm run smoke

@@ -64,18 +64,32 @@ the same seam as further modes) and each package in it is resolved against
 *two independent surfaces of its authority*, kept as separate columns exactly
 like pockets:
 
-| unit | surface `api`-side | surface `index`-side | advisories |
-|---|---|---|---|
-| crates.io | `crates.io/api/v1/crates/{name}` (max stable) | `index.crates.io/{prefix}/{name}` (sparse index, raw NDJSON) | OSV `crates.io`, one `querybatch` for the whole scope |
-| PyPI | `pypi.org/pypi/{name}/json` | `pypi.org/simple/{name}/` (PEP 691 JSON) | OSV `PyPI` |
-| npm | packument (abbreviated doc) | `/{name}/latest` manifest | OSV `npm` |
+| unit | surfaces | advisories (OSV) |
+|---|---|---|
+| crates.io (Rust) | API `crates.io/api/v1` · sparse index `index.crates.io` (raw NDJSON) | `crates.io` |
+| PyPI (Python) | JSON API · simple index (PEP 691 JSON) | `PyPI` |
+| npm (JavaScript) | packument · `/latest` manifest · **cross-host yarnpkg mirror** | `npm` |
+| RubyGems (Ruby) | gems API · versions API | `RubyGems` |
+| Maven Central (JVM) | **repository `maven-metadata.xml` · search index** (`group:artifact` names) | `Maven` |
+| Go modules | proxy `@latest` (resolved) · proxy `@v/list` (raw; module-path names, bang-escaped) | `Go` |
+| NuGet (.NET) | flat container · registration index | `NuGet` |
+| Packagist (PHP) | metadata CDN `repo.packagist.org/p2` · `packagist.org` API (`vendor/package` names) | `Packagist` |
+| Hex (Elixir) | hex.pm API — single surface (repo endpoints are signed protobuf) | `Hex` |
+| pub.dev (Dart) | pub.dev API — single surface | `Pub` |
+| CRAN (R) | package DESCRIPTION file — single surface | `CRAN` |
 
-Where the surfaces disagree — CDN staleness, yank propagation, prerelease
-policy differences — that is drift, surfaced identically to pocket drift.
-The honesty gradient is stated in the surface labels: crates.io and PyPI
-expose two genuinely distinct serving paths; npm's two are different
-representations of one backend. Prerelease-policy noise is filtered (surface
-comparison uses final releases), so drift means something real.
+Advisory joins are one OSV `querybatch` per unit for the whole scope.
+
+Where surfaces disagree — CDN staleness, yank propagation, search-index lag
+(Maven's is famous), mirror lag — that is drift, surfaced identically to
+pocket drift. The honesty gradient is stated in the surface labels: Maven's
+two are genuinely separate services, npm's yarnpkg surface is a real
+cross-host mirror, while npm's own pair and RubyGems' pair are different
+resources of one backend; Hex, pub.dev, and CRAN expose one practical read
+path, so their single-surface units can never show drift — stated, not
+hidden. Prerelease-policy noise is filtered (surface comparison prefers final
+releases), so drift means something real. Version comparison never falls back
+to string order.
 
 ## Signature verification
 
@@ -152,6 +166,24 @@ The entire codebase is TypeScript against the shared contract in
 `shared/types.ts`. `npm run lint` and `npm run typecheck` pass with zero
 findings and are the gate for any change.
 
+## CI
+
+Two workflows under `.github/workflows/` (validated with actionlint):
+
+- **lint** — ESLint + the TypeScript compiler across server, shared, and web;
+  the same commands as the local gates, so CI and a checkout can never
+  disagree about "clean".
+- **build** — compiles both halves and uploads `server/dist` + `web/dist` as
+  an artifact, then a **runtime smoke** job downloads that artifact,
+  installs production-only server deps, and runs `npm run smoke`
+  (`scripts/smoke.mjs`): boots the built service on a minimal dedicated
+  config and asserts live that a real apt pocket syncs `signature+digest`
+  through gpgv, an npm scope resolves on all three surfaces including the
+  cross-host yarnpkg mirror, search returns per-source versions, and the
+  built frontend is served. Advisory/enrichment sources are disabled in the
+  smoke config so only security.ubuntu.com and the npm registries can affect
+  the verdict. The smoke runs locally too: `npm run build && npm run smoke`.
+
 ## What each distro aggregates
 
 | distro | comprehensive list from | advisory feed | enrichment ecosystem |
@@ -218,10 +250,13 @@ POST /api/reload                                         re-read config
   embedded in the tarball); Alpine index data is fetch-trusted over TLS.
   Arch's packages API is likewise TLS-only, with no detached signing to
   verify.
-- The Arch AVG endpoint (`security.archlinux.org/issues/all.json`) is the one
-  default URL not verified from the environment this project was built in; if
-  it has moved, the source will show a visible error with the URL — adjust it
-  in the config.
+- Endpoints verified live from the build environment: Ubuntu archive (all
+  pockets, GPG + digest), crates.io (both surfaces), PyPI (both), npm (all
+  three including the yarnpkg mirror). The remaining defaults — Debian,
+  Alpine, Arch mirrors; RubyGems, Maven, Go proxy, NuGet, Packagist, Hex,
+  pub.dev, CRAN — are written to their documented protocols but were not
+  reachable from the build environment; any that has drifted will show a
+  visible per-source error with its URL, and the fix is a config edit.
 - Ubuntu binary↔source advisory joins use the names the USN feed provides; a
   notice naming only source packages joins on the source name.
 - Version-drift ordering for apk/Arch/registry schemes uses the dpkg
