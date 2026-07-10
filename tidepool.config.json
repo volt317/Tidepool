@@ -182,6 +182,108 @@
     },
     "docker.io": {
       "eol": "docker-engine"
+    },
+    "serde": {
+      "github": "serde-rs/serde"
+    },
+    "tokio": {
+      "github": "tokio-rs/tokio"
+    },
+    "cryptography": {
+      "github": "pyca/cryptography"
+    },
+    "django": {
+      "github": "django/django",
+      "eol": "django"
+    },
+    "requests": {
+      "github": "psf/requests"
+    },
+    "express": {
+      "github": "expressjs/express"
+    },
+    "react": {
+      "github": "facebook/react",
+      "eol": "react"
+    },
+    "numpy": {
+      "github": "numpy/numpy",
+      "eol": "numpy"
     }
-  }
+  },
+  "ecosystems": [
+    {
+      "id": "crates-io",
+      "label": "crates.io (Rust)",
+      "ecosystem": "crates-io",
+      "enabled": true,
+      "osvEcosystem": "crates.io",
+      "$comment.scope": "The aggregated set. mode 'list' is explicit; registry-wide enumerators plug into the same seam as further modes.",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "serde",
+          "tokio",
+          "openssl",
+          "ring",
+          "rustls",
+          "hyper",
+          "reqwest",
+          "clap",
+          "rand",
+          "regex",
+          "zerocopy",
+          "time"
+        ]
+      }
+    },
+    {
+      "id": "pypi",
+      "label": "PyPI (Python)",
+      "ecosystem": "pypi",
+      "enabled": true,
+      "osvEcosystem": "PyPI",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "cryptography",
+          "requests",
+          "urllib3",
+          "django",
+          "flask",
+          "numpy",
+          "pillow",
+          "pyyaml",
+          "setuptools",
+          "certifi",
+          "jinja2",
+          "paramiko"
+        ]
+      }
+    },
+    {
+      "id": "npm",
+      "label": "npm (JavaScript)",
+      "ecosystem": "npm",
+      "enabled": true,
+      "osvEcosystem": "npm",
+      "scope": {
+        "mode": "list",
+        "packages": [
+          "express",
+          "lodash",
+          "react",
+          "axios",
+          "next",
+          "vite",
+          "typescript",
+          "webpack",
+          "jsonwebtoken",
+          "minimist",
+          "undici",
+          "koa"
+        ]
+      }
+    }
+  ]
 }

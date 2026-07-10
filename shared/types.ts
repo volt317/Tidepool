@@ -112,12 +112,18 @@ export interface EnrichRecord {
 
 // -------------------------------------------------------------- API bodies
 
-export interface DistroStatusBody {
+/** Aggregation domains. Both run the same contained core flow. */
+export type DomainId = "distro" | "code";
+
+export interface UnitStatusBody {
+  domain: DomainId;
   id: string;
   label: string;
-  family: DistroFamily;
+  /** distro family or code ecosystem, e.g. "apt", "crates-io" */
+  kind: string;
   osvEcosystem: string | null;
-  pocketOrder: string[];
+  /** ordered ids of this unit's index sources (pockets / repos / surfaces) */
+  sourceOrder: string[];
   status: "idle" | "syncing" | "ready" | "error";
   startedAt: number | null;
   finishedAt: number | null;
@@ -126,18 +132,25 @@ export interface DistroStatusBody {
   sources: SourceRecord[];
 }
 
+export interface DomainBody {
+  id: DomainId;
+  label: string;
+  units: UnitStatusBody[];
+}
+
 export interface PackagesBody {
   total: number;
   page: number;
   per: number;
-  pocketOrder: string[];
+  sourceOrder: string[];
   items: PackageSummary[];
 }
 
 export interface PackageDetailBody {
-  distro: string;
+  domain: DomainId;
+  unit: string;
   package: PackageRow;
-  pocketOrder: string[];
+  sourceOrder: string[];
   summary: PackageSummary;
   advisories: JoinedAdvisory[];
   hints: PackageHints | null;
@@ -201,6 +214,26 @@ export interface DistroConfig {
   osvEcosystem?: string | null;
 }
 
+// ---------------------------------------------------- code-ecosystem units
+
+export type CodeEcosystem = "crates-io" | "pypi" | "npm";
+
+export interface CodeScope {
+  /** "list" = the explicit package set below. The seam is deliberate:
+   *  registry-wide enumerators plug in here as further modes. */
+  mode: "list";
+  packages: string[];
+}
+
+export interface CodeUnitConfig {
+  id: string;
+  label: string;
+  enabled?: boolean;
+  ecosystem: CodeEcosystem;
+  osvEcosystem?: string | null;
+  scope: CodeScope;
+}
+
 export interface PackageHints {
   github?: string;
   eol?: string;
@@ -214,6 +247,7 @@ export interface TidepoolConfig {
     advisoryTtlHours?: number;
   };
   distros: DistroConfig[];
+  ecosystems?: CodeUnitConfig[];
   enrichment?: {
     osv?: boolean;
     endoflife?: boolean;

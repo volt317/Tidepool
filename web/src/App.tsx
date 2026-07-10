@@ -9,12 +9,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type {
-  DistroStatusBody,
+  DomainBody,
   EnrichBody,
   EnrichRecord,
   PackageDetailBody,
   PackagesBody,
   SourceRecord,
+  UnitStatusBody,
 } from "../../shared/types";
 
 type ApiExtra = { error?: string; syncing?: boolean };
@@ -200,7 +201,7 @@ function EnrichPanel({ record }: { record: EnrichRecord }) {
   );
 }
 
-function PackageDrawer({ distro, name, onClose }: { distro: string; name: string; onClose: () => void }) {
+function PackageDrawer({ domain, unit, name, onClose }: { domain: string; unit: string; name: string; onClose: () => void }) {
   const [detail, setDetail] = useState<PackageDetailBody | null>(null);
   const [enrich, setEnrich] = useState<(EnrichBody & ApiExtra) | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -210,14 +211,14 @@ function PackageDrawer({ distro, name, onClose }: { distro: string; name: string
     setDetail(null);
     setEnrich(null);
     setErr(null);
-    api<PackageDetailBody>(`/distros/${distro}/packages/${encodeURIComponent(name)}`).then(({ status, body }) => {
+    api<PackageDetailBody>(`/domains/${domain}/units/${unit}/packages/${encodeURIComponent(name)}`).then(({ status, body }) => {
       if (!live) return;
       if (status !== 200) {
         setErr(body.error || `HTTP ${status}`);
         return;
       }
       setDetail(body);
-      api<EnrichBody>(`/distros/${distro}/packages/${encodeURIComponent(name)}/enrich`).then(({ status: s2, body: b2 }) => {
+      api<EnrichBody>(`/domains/${domain}/units/${unit}/packages/${encodeURIComponent(name)}/enrich`).then(({ status: s2, body: b2 }) => {
         if (!live) return;
         setEnrich(s2 === 200 ? b2 : { package: name, records: [], error: b2.error || `HTTP ${s2}` });
       });
@@ -225,7 +226,7 @@ function PackageDrawer({ distro, name, onClose }: { distro: string; name: string
     return () => {
       live = false;
     };
-  }, [distro, name]);
+  }, [domain, unit, name]);
 
   return (
     <div
@@ -275,10 +276,10 @@ function PackageDrawer({ distro, name, onClose }: { distro: string; name: string
 
           {/* index sources: one row per pocket/repo */}
           <h3 style={{ ...mono, fontSize: 11, color: C.mist, textTransform: "uppercase", letterSpacing: "0.07em", margin: "18px 0 8px" }}>
-            index sources
+            sources
           </h3>
           <div style={{ background: C.shallows, border: `1px solid ${C.poolEdge}`, borderRadius: 6 }}>
-            {detail.pocketOrder.map((p, i) => {
+            {detail.sourceOrder.map((p, i) => {
               const v = detail.package.versions[p];
               const isCurrent = v && v === detail.summary.current;
               return (
@@ -353,43 +354,47 @@ function PackageDrawer({ distro, name, onClose }: { distro: string; name: string
 // -------------------------------------------------------------------- app
 
 export default function App() {
-  const [distros, setDistros] = useState<DistroStatusBody[]>([]);
+  const [domains, setDomains] = useState<DomainBody[]>([]);
+  const [activeDomain, setActiveDomain] = useState<string | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [filters, setFilters] = useState<Filters>({ advisories: false, drift: false });
   const [page, setPage] = useState(1);
-  const [table, setTable] = useState<PackagesBody>({ total: 0, page: 1, per: 50, items: [], pocketOrder: [] });
+  const [table, setTable] = useState<PackagesBody>({ total: 0, page: 1, per: 50, items: [], sourceOrder: [] });
   const [tableState, setTableState] = useState<"idle" | "loading" | "syncing" | "error">("idle");
   const [tableErr, setTableErr] = useState<string | null>(null);
   const [openPkg, setOpenPkg] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const per = 50;
 
-  const loadDistros = useCallback(async () => {
-    const { body } = await api<{ distros: DistroStatusBody[] }>("/distros");
-    setDistros(body.distros ?? []);
-    return body.distros ?? [];
+  const loadDomains = useCallback(async () => {
+    const { body } = await api<{ domains: DomainBody[] }>("/domains");
+    setDomains(body.domains ?? []);
+    return body.domains ?? [];
   }, []);
 
   const activeRef = useRef(active);
   activeRef.current = active;
   useEffect(() => {
-    void loadDistros().then((ds) => {
-      if (ds.length && !activeRef.current) setActive(ds[0].id);
+    void loadDomains().then((ds) => {
+      if (ds.length && !activeRef.current) {
+        setActiveDomain(ds[0].id);
+        setActive(ds[0].units[0]?.id ?? null);
+      }
     });
-  }, [loadDistros]);
+  }, [loadDomains]);
 
   const loadTable = useCallback(async () => {
-    if (!active) return;
+    if (!active || !activeDomain) return;
     setTableState("loading");
     setTableErr(null);
     const params = new URLSearchParams({ q, page: String(page), per: String(per) });
     if (filters.advisories) params.set("advisories", "1");
     if (filters.drift) params.set("drift", "1");
-    const { status, body } = await api<PackagesBody>(`/distros/${active}/packages?${params}`);
+    const { status, body } = await api<PackagesBody>(`/domains/${activeDomain}/units/${active}/packages?${params}`);
     if (status === 202) {
       setTableState("syncing");
-      loadDistros();
+      void loadDomains();
       clearTimeout(pollRef.current);
       pollRef.current = setTimeout(loadTable, 2500);
       return;
@@ -397,27 +402,29 @@ export default function App() {
     if (status !== 200) {
       setTableState("error");
       setTableErr(body.error || `HTTP ${status}`);
-      loadDistros();
+      void loadDomains();
       return;
     }
     setTable(body as PackagesBody);
     setTableState("idle");
-    loadDistros();
-  }, [active, q, page, filters, loadDistros]);
+    void loadDomains();
+  }, [active, activeDomain, q, page, filters, loadDomains]);
 
   useEffect(() => {
     void loadTable();
     return () => clearTimeout(pollRef.current);
   }, [loadTable]);
 
-  useEffect(() => setPage(1), [q, active, filters]);
+  useEffect(() => setPage(1), [q, active, activeDomain, filters]);
 
-  const current = useMemo(() => distros.find((d) => d.id === active), [distros, active]);
+  const currentDomain = useMemo(() => domains.find((d) => d.id === activeDomain), [domains, activeDomain]);
+  const units: UnitStatusBody[] = useMemo(() => currentDomain?.units ?? [], [currentDomain]);
+  const current = useMemo(() => units.find((u) => u.id === active), [units, active]);
   const pages = Math.max(1, Math.ceil(table.total / per));
 
   const forceSync = async () => {
-    if (!active) return;
-    await api<{ started: boolean }>(`/distros/${active}/sync`, { method: "POST" });
+    if (!active || !activeDomain) return;
+    await api<{ started: boolean }>(`/domains/${activeDomain}/units/${active}/sync`, { method: "POST" });
     setTableState("syncing");
     clearTimeout(pollRef.current);
     pollRef.current = setTimeout(loadTable, 2500);
@@ -452,9 +459,35 @@ export default function App() {
           </p>
         </header>
 
-        {/* distro tabs */}
-        <nav style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 20 }} aria-label="Distributions">
-          {distros.map((d) => (
+        {/* domain selector */}
+        <nav style={{ display: "flex", gap: 14, marginTop: 20 }} aria-label="Domains">
+          {domains.map((d) => (
+            <button
+              key={d.id}
+              onClick={() => {
+                setActiveDomain(d.id);
+                setActive(d.units[0]?.id ?? null);
+              }}
+              style={{
+                ...display,
+                fontSize: 14,
+                fontWeight: 600,
+                padding: "4px 2px",
+                background: "transparent",
+                border: "none",
+                borderBottom: `2px solid ${d.id === activeDomain ? C.tide : "transparent"}`,
+                color: d.id === activeDomain ? C.foam : C.mist,
+                cursor: "pointer",
+              }}
+            >
+              {d.label}
+            </button>
+          ))}
+        </nav>
+
+        {/* unit tabs */}
+        <nav style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }} aria-label="Units">
+          {units.map((d) => (
             <button
               key={d.id}
               onClick={() => setActive(d.id)}
@@ -476,7 +509,7 @@ export default function App() {
           ))}
         </nav>
 
-        {/* distro status strip */}
+        {/* unit status strip */}
         {current && (
           <div style={{ background: C.pool, border: `1px solid ${C.poolEdge}`, borderRadius: 8, padding: 14, marginTop: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -543,7 +576,7 @@ export default function App() {
           <table>
             <thead>
               <tr>
-                {["package", ...table.pocketOrder, "signals"].map((h) => (
+                {["package", ...table.sourceOrder, "signals"].map((h) => (
                   <th
                     key={h}
                     style={{ ...mono, fontSize: 10.5, color: C.mist, textTransform: "uppercase", letterSpacing: "0.07em", textAlign: "left", padding: "10px 14px", borderBottom: `1px solid ${C.poolEdge}` }}
@@ -560,7 +593,7 @@ export default function App() {
                     <div style={{ ...mono, fontSize: 13, color: C.foam }}>{it.name}</div>
                     {it.source !== it.name && <div style={{ ...mono, fontSize: 10.5, color: C.kelp }}>src {it.source}</div>}
                   </td>
-                  {table.pocketOrder.map((p) => {
+                  {table.sourceOrder.map((p) => {
                     const v = it.versions[p];
                     const isCurrent = v && v === it.current && it.drift;
                     return (
@@ -579,8 +612,8 @@ export default function App() {
               ))}
               {table.items.length === 0 && tableState === "idle" && (
                 <tr>
-                  <td colSpan={2 + table.pocketOrder.length} style={{ padding: 18, color: C.mist, fontSize: 13 }}>
-                    Nothing matches. Clear the filter, or re-sync if this distro has never synced.
+                  <td colSpan={2 + table.sourceOrder.length} style={{ padding: 18, color: C.mist, fontSize: 13 }}>
+                    Nothing matches. Clear the filter, or re-sync if this unit has never synced.
                   </td>
                 </tr>
               )}
@@ -617,7 +650,7 @@ export default function App() {
         </footer>
       </div>
 
-      {openPkg && active && <PackageDrawer distro={active} name={openPkg} onClose={() => setOpenPkg(null)} />}
+      {openPkg && active && activeDomain && <PackageDrawer domain={activeDomain} unit={active} name={openPkg} onClose={() => setOpenPkg(null)} />}
     </div>
   );
 }

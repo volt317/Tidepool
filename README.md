@@ -1,15 +1,35 @@
 # Tidepool
 
-**A self-hosted distro survey service.** Point it at the Linux distributions
-you care about and it pulls each one's *complete* package list from the
-distribution's own index sources, joins the distribution's advisory feed on
-top, and gives you a searchable console over the result — with every source
-fetched, cryptographically verified where the distro signs, and parsed
-individually, so every fact on screen traces back to the endpoint that said
+**A self-hosted upstream survey service.** Tidepool runs one contained
+aggregation flow over two parallel domains: **Linux distributions** (the
+complete package list from each distro's own index sources, advisory feed
+joined on top) and **code ecosystems** (a declared scope of crates.io / PyPI
+/ npm packages, each resolved against multiple independent surfaces of its
+registry, OSV advisories joined on top). In both domains every source is
+fetched, cryptographically verified where the authority signs, and parsed
+individually — so every fact on screen traces back to the endpoint that said
 it.
 
 > A tidepool is what the ocean leaves behind where you can actually look at
 > it. Upstream churns constantly; this makes your slice of it inspectable.
+
+## The contained flow
+
+Every unit of either domain moves through the same pipeline, implemented once
+in `server/src/core/aggregator.ts`:
+
+```
+syncIndex()  →  rows with per-source versions   (sources never blended)
+syncAdvisories()  →  advisories joined by name
+disk cache (TTL'd)  →  summaries: current version (dpkg compare), drift,
+advisory counts  →  search / filter / pagination  →  on-demand enrichment
+```
+
+A domain implements only the `UnitProvider` seam — how to enumerate and
+verify its sources. The distro domain's providers are apt pockets, Alpine
+APKINDEX repos, and Arch's packages API; the code domain's providers are
+registry surfaces. Everything above the seam is shared and identical: drift
+detection, advisory joins, caching, the API, and the console.
 
 ## What it does
 
@@ -32,9 +52,30 @@ it.
   demand. Advisory counts appear in the table; details, CVEs, and fixed
   versions in the package drawer.
 - **On-demand upstream enrichment.** Opening a package queries OSV for the
-  distro's ecosystem (full count via `querybatch`, details for the newest
+  unit's ecosystem (full count via `querybatch`, details for the newest
   few), plus endoflife.date lifecycle and GitHub releases for packages mapped
   in `packageHints` — each panel with its own status and endpoint.
+
+## The code-ecosystem domain
+
+The same premises, applied to language registries. A code unit declares a
+**scope** (an explicit package set today; registry-wide enumerators plug into
+the same seam as further modes) and each package in it is resolved against
+*two independent surfaces of its authority*, kept as separate columns exactly
+like pockets:
+
+| unit | surface `api`-side | surface `index`-side | advisories |
+|---|---|---|---|
+| crates.io | `crates.io/api/v1/crates/{name}` (max stable) | `index.crates.io/{prefix}/{name}` (sparse index, raw NDJSON) | OSV `crates.io`, one `querybatch` for the whole scope |
+| PyPI | `pypi.org/pypi/{name}/json` | `pypi.org/simple/{name}/` (PEP 691 JSON) | OSV `PyPI` |
+| npm | packument (abbreviated doc) | `/{name}/latest` manifest | OSV `npm` |
+
+Where the surfaces disagree — CDN staleness, yank propagation, prerelease
+policy differences — that is drift, surfaced identically to pocket drift.
+The honesty gradient is stated in the surface labels: crates.io and PyPI
+expose two genuinely distinct serving paths; npm's two are different
+representations of one backend. Prerelease-policy noise is filtered (surface
+comparison uses final releases), so drift means something real.
 
 ## Signature verification
 
@@ -65,14 +106,19 @@ files onto the host and point `index.keyrings` at them.
 ```
 tidepool.config.json          everything the service does is declared here
 shared/types.ts               the typed API contract (server implements, web consumes)
-server/src/                   TypeScript collector + API (express; node ≥ 18)
-  index.ts                    orchestration, cache, HTTP API, static serving
+server/src/
+  index.ts                    thin bootstrap: config → providers → core → routes
+  core/aggregator.ts          the contained flow: sync, cache, summaries, drift,
+                              enrichment — domain-agnostic
+  core/routes.ts              /api/domains/:domain/units/:unit/… (symmetric)
+  core/enrich.ts              shared OSV / endoflife / GitHub adapters + OSV batch join
   lib/util.ts                 fetch/gzip/sha256, deb822 parsing, dpkg version
                               compare, ustar reader, disk cache
   lib/gpg.ts                  InRelease signature verification via gpgv
-  sources/apt.ts              Ubuntu/Debian pockets (signature- and digest-verified)
-  sources/apk_arch.ts         Alpine APKINDEX + secdb, Arch packages API + AVG
-  sources/advisories.ts       Ubuntu USN feed; OSV / endoflife / GitHub enrichment
+  domains/providers.ts        config → UnitProviders for both domains
+  domains/distro/             apt pockets (signature+digest verified), Alpine
+                              APKINDEX + secdb, Arch packages API + AVG, USN feed
+  domains/code/surfaces.ts    crates.io / PyPI / npm dual-surface resolvers
 web/                          React + Vite console (TypeScript)
 eslint.config.js              flat config: typescript-eslint + react-hooks
 ```
@@ -124,6 +170,9 @@ findings and are the gate for any change.
   digest verification with keyring paths, advisory feed and its depth
   (`pages`), OSV ecosystem string. Adding another release or a derivative is
   a new entry with different suites — no code.
+- `ecosystems[]` — code units: ecosystem (`crates-io` / `pypi` / `npm`), OSV
+  ecosystem string, and the `scope` package set. Widening the watch is
+  editing a list.
 - `server.indexTtlHours` / `advisoryTtlHours` — how long synced data is
   trusted (disk-cached under `cacheDir`; a restart reuses fresh cache).
 - `packageHints` — source-package → upstream mappings (`github`, `eol`) that
@@ -136,14 +185,16 @@ findings and are the gate for any change.
 
 ## API
 
+Domain-symmetric by construction — the same routes serve both domains:
+
 ```
 GET  /api/config
-GET  /api/distros                              status + per-source health
-POST /api/distros/:id/sync                     force re-sync
-GET  /api/distros/:id/packages?q=&page=&per=&advisories=1&drift=1
-GET  /api/distros/:id/packages/:name           all index sources + joined advisories
-GET  /api/distros/:id/packages/:name/enrich    OSV / endoflife / GitHub, per-record status
-POST /api/reload                               re-read config
+GET  /api/domains                                        domains → units → per-source health
+POST /api/domains/:domain/units/:unit/sync               force re-sync
+GET  /api/domains/:domain/units/:unit/packages?q=&page=&per=&advisories=1&drift=1
+GET  /api/domains/:domain/units/:unit/packages/:name     all sources + joined advisories
+GET  /api/domains/:domain/units/:unit/packages/:name/enrich
+POST /api/reload                                         re-read config
 ```
 
 ## Design principles
@@ -173,8 +224,12 @@ POST /api/reload                               re-read config
   in the config.
 - Ubuntu binary↔source advisory joins use the names the USN feed provides; a
   notice naming only source packages joins on the source name.
-- Version-drift ordering for apk/Arch uses the dpkg comparator, which orders
-  those schemes correctly in practice but is not their native comparator.
+- Version-drift ordering for apk/Arch/registry schemes uses the dpkg
+  comparator, which orders them correctly in practice but is not their native
+  comparator.
+- Code-unit scopes are explicit lists; registry-wide enumeration (e.g. the
+  PyPI simple index's full name list) is a further `scope.mode` behind the
+  same seam, not yet implemented.
 
 ## License
 
