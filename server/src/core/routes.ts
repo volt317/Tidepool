@@ -11,6 +11,7 @@ import { buildSnapshot, exportSnapshot, type ExportFormat, type SnapshotStore } 
 import type { SnapshotStage } from "../../../shared/types.js";
 
 const STAGES: SnapshotStage[] = ["observation", "churn", "interpretive"];
+const DIGEST_PARAM = /^([0-9a-f]{64})$/;
 const FORMATS: ExportFormat[] = ["json", "ndjson", "md", "html", "sqlite", "bundle"];
 
 export function buildRouter(agg: Aggregator, inflow: InflowStore, snapshots: SnapshotStore): Router {
@@ -165,11 +166,27 @@ export function buildRouter(agg: Aggregator, inflow: InflowStore, snapshots: Sna
   });
 
   r.get("/snapshots", (_req, res) => {
-    res.json({ snapshots: snapshots.list() });
+    try {
+      res.json({ snapshots: snapshots.list() });
+    } catch (e) {
+      // a stored snapshot failing validation is a visible fact, not a crash
+      res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+    }
   });
 
   r.get("/snapshots/:digest", (req, res) => {
-    const doc = snapshots.load(req.params.digest);
+    const dm = DIGEST_PARAM.exec(req.params.digest);
+    if (!dm) {
+      res.status(400).json({ error: "digest must be 64 hex characters" });
+      return;
+    }
+    let doc;
+    try {
+      doc = snapshots.load(dm[1]);
+    } catch (e) {
+      res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+      return;
+    }
     if (!doc) {
       res.status(404).json({ error: "unknown snapshot" });
       return;
@@ -178,7 +195,18 @@ export function buildRouter(agg: Aggregator, inflow: InflowStore, snapshots: Sna
   });
 
   r.get("/snapshots/:digest/export/:format", (req, res) => {
-    const doc = snapshots.load(req.params.digest);
+    const dm = DIGEST_PARAM.exec(req.params.digest);
+    if (!dm) {
+      res.status(400).json({ error: "digest must be 64 hex characters" });
+      return;
+    }
+    let doc;
+    try {
+      doc = snapshots.load(dm[1]);
+    } catch (e) {
+      res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+      return;
+    }
     if (!doc) {
       res.status(404).json({ error: "unknown snapshot" });
       return;

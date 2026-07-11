@@ -1,0 +1,40 @@
+# CodeQL security analysis over the whole TypeScript/JavaScript tree
+# (server, shared, web, scripts) with the security-and-quality query suite.
+# Interpreted language, so build-mode none — no compilation step needed for
+# extraction. Runs on pushes, PRs, and a weekly schedule so newly published
+# queries re-scan the unchanged codebase.
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "31 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-and-quality
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"

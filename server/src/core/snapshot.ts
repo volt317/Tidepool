@@ -10,8 +10,11 @@
 // built from the same store-only inputs (no network), content-addressed over
 // canonical JSON, and every export format renders from the same SnapshotDoc.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+
+import { parseJsonCorpus, readCorpusText, writeCorpusAtomic } from "../lib/corpus.js";
+import { validateSnapshotDoc } from "../lib/validate.js";
 import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 
@@ -169,6 +172,9 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
 
 // ----------------------------------------------------------------- storage
 
+/** Content addresses are lowercase hex sha256 — nothing else touches disk. */
+const DIGEST_RE = /^([0-9a-f]{64})$/;
+
 export class SnapshotStore {
   constructor(private root: string) {
     mkdirSync(root, { recursive: true });
@@ -176,23 +182,30 @@ export class SnapshotStore {
   save(doc: SnapshotDoc): string {
     const digest = doc.digest ?? digestOf(doc);
     const path = join(this.root, `${digest}.json`);
-    if (!existsSync(path)) {
-      const tmp = `${path}.tmp`;
-      writeFileSync(tmp, stableStringify(doc));
-      renameSync(tmp, path);
-    }
+    if (!existsSync(path)) writeCorpusAtomic(path, stableStringify(doc)); // one whole-corpus write
     return digest;
   }
   load(digest: string): SnapshotDoc | null {
-    const path = join(this.root, `${digest}.json`);
+    // content addresses are 64 hex chars; the value used to build the path is
+    // the anchored match's capture, never the caller's string
+    const m = DIGEST_RE.exec(digest);
+    if (!m) return null;
+    const path = join(this.root, `${m[1]}.json`);
     if (!existsSync(path)) return null;
-    return JSON.parse(readFileSync(path, "utf8")) as SnapshotDoc;
+    // one whole-corpus read → parse to an object → validate in code
+    const parsed = parseJsonCorpus(readCorpusText(path), `snapshot ${m[1].slice(0, 12)}`);
+    const v = validateSnapshotDoc(parsed, `snapshot ${m[1].slice(0, 12)}`);
+    if (!v.doc) throw new Error(`stored snapshot failed validation: ${v.errors.slice(0, 3).join("; ")}`);
+    return v.doc;
   }
   list(): { digest: string; stage: SnapshotStage; createdAt: number; units: number; changes: number }[] {
     return readdirSync(this.root)
       .filter((f) => f.endsWith(".json"))
       .map((f) => {
-        const d = JSON.parse(readFileSync(join(this.root, f), "utf8")) as SnapshotDoc;
+        const parsed = parseJsonCorpus(readCorpusText(join(this.root, f)), f);
+        const v = validateSnapshotDoc(parsed, f);
+        if (!v.doc) throw new Error(`stored snapshot ${f} failed validation: ${v.errors.slice(0, 3).join("; ")}`);
+        const d = v.doc;
         return {
           digest: f.replace(/\.json$/, ""),
           stage: d.stage,

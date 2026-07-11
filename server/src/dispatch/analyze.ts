@@ -18,7 +18,9 @@
 // Anything else classifies as `unrecognized` and yields an explicit
 // insufficient-evidence finding rather than silence.
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+
+import { readCorpusText } from "../lib/corpus.js";
 import { join, resolve } from "node:path";
 
 import type {
@@ -48,7 +50,7 @@ export const ANALYZER_VERSIONS: Record<string, string> = {
 
 // ------------------------------------------------------------ classification
 
-const read = (p: string): string | null => (existsSync(p) ? readFileSync(p, "utf8") : null);
+const read = (p: string): string | null => (existsSync(p) ? readCorpusText(p) : null);
 
 interface Detection {
   cls: ProjectClass;

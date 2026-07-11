@@ -15,8 +15,11 @@
 //     ids, confidence basis, evidence references, and ambiguities. They
 //     never touch the observation log.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+
+import { appendCorpus, parseJsonCorpus, readCorpusText, writeCorpusAtomic } from "../lib/corpus.js";
+import { validateChange, validateObservation } from "../lib/validate.js";
 
 import type { ChangeKind, ChangeRecord, HeuristicFinding, Observation } from "../../../shared/types.js";
 import { sha256hex } from "../lib/util.js";
@@ -54,28 +57,26 @@ export class InflowStore {
     const body = stableStringify(records);
     const digest = sha256hex(Buffer.from(body));
     const path = join(this.root, "records", `${digest}.json`);
-    if (!existsSync(path)) {
-      const tmp = `${path}.tmp`;
-      writeFileSync(tmp, body);
-      renameSync(tmp, path);
-    }
+    if (!existsSync(path)) writeCorpusAtomic(path, body); // one whole-corpus write
     const count = Array.isArray(records) ? records.length : Object.keys(records as object).length;
     return { digest, count };
   }
 
   getRecords<T = unknown>(digest: string): T | null {
-    const path = join(this.root, "records", `${digest}.json`);
+    const m = /^([0-9a-f]{64})$/.exec(digest);
+    if (!m) return null;
+    const path = join(this.root, "records", `${m[1]}.json`);
     if (!existsSync(path)) return null;
-    return JSON.parse(readFileSync(path, "utf8")) as T;
+    return parseJsonCorpus(readCorpusText(path), `records ${m[1].slice(0, 12)}`) as T;
   }
 
   appendObservation(obs: Observation): void {
-    appendFileSync(join(this.unitDir(obs.domain, obs.unit), "observations.ndjson"), JSON.stringify(obs) + "\n");
+    appendCorpus(join(this.unitDir(obs.domain, obs.unit), "observations.ndjson"), JSON.stringify(obs) + "\n");
   }
 
   appendChanges(domain: string, unit: string, changes: ChangeRecord[]): void {
     if (changes.length === 0) return;
-    appendFileSync(
+    appendCorpus(
       join(this.unitDir(domain, unit), "changes.ndjson"),
       changes.map((c) => JSON.stringify(c)).join("\n") + "\n"
     );
@@ -84,19 +85,29 @@ export class InflowStore {
   observations(domain: string, unit: string): Observation[] {
     const path = join(this.unitDir(domain, unit), "observations.ndjson");
     if (!existsSync(path)) return [];
-    return readFileSync(path, "utf8")
+    // one whole-corpus read; parse and validate each record in code —
+    // corruption of the append-only truth log is loud, never skipped
+    return readCorpusText(path)
       .split("\n")
       .filter(Boolean)
-      .map((l) => JSON.parse(l) as Observation);
+      .map((l, n) => {
+        const v = validateObservation(parseJsonCorpus(l, `${domain}/${unit} observations line ${n + 1}`), `${domain}/${unit} observations line ${n + 1}`);
+        if (!v.obs) throw new Error(`history corrupt: ${v.errors[0]}`);
+        return v.obs;
+      });
   }
 
   changes(domain: string, unit: string): ChangeRecord[] {
     const path = join(this.unitDir(domain, unit), "changes.ndjson");
     if (!existsSync(path)) return [];
-    return readFileSync(path, "utf8")
+    return readCorpusText(path)
       .split("\n")
       .filter(Boolean)
-      .map((l) => JSON.parse(l) as ChangeRecord);
+      .map((l, n) => {
+        const v = validateChange(parseJsonCorpus(l, `${domain}/${unit} changes line ${n + 1}`), `${domain}/${unit} changes line ${n + 1}`);
+        if (!v.change) throw new Error(`history corrupt: ${v.errors[0]}`);
+        return v.change;
+      });
   }
 
   /** newest prior observation of the same source, if any */

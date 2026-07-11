@@ -9,11 +9,23 @@
 // Exit codes: 0 = analyzed; 3 = analyzed with security-review findings;
 // 2 = usage/store error.
 
-import { readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import type { SnapshotDoc } from "../../../shared/types.js";
+import { parseJsonCorpus, readCorpusText, writeCorpusAtomic } from "../lib/corpus.js";
+import { validateSnapshotDoc } from "../lib/validate.js";
 import { analyzeAgainstSnapshot, classifyPath } from "../dispatch/analyze.js";
+
+function loadSnapshotCorpus(path: string, name: string): SnapshotDoc {
+  const v = validateSnapshotDoc(parseJsonCorpus(readCorpusText(path), name), name);
+  if (!v.doc) {
+    console.error(`dispatch: ${name} failed validation:`);
+    for (const e of v.errors.slice(0, 8)) console.error(`  - ${e}`);
+    process.exit(2);
+  }
+  return v.doc;
+}
 
 function arg(name: string): string | null {
   const i = process.argv.indexOf(name);
@@ -37,7 +49,7 @@ function main(): number {
   if (wanted === "latest") {
     const all = readdirSync(snapDir)
       .filter((f) => f.endsWith(".json"))
-      .map((f) => ({ f, doc: JSON.parse(readFileSync(join(snapDir, f), "utf8")) as SnapshotDoc }))
+      .map((f) => ({ f, doc: loadSnapshotCorpus(join(snapDir, f), f) }))
       .sort((a, b) => b.doc.createdAt - a.doc.createdAt);
     if (all.length === 0) {
       console.error("dispatch: no snapshots in store — POST /api/snapshots first");
@@ -45,7 +57,11 @@ function main(): number {
     }
     digest = all[0].f.replace(/\.json$/, "");
   }
-  const doc = JSON.parse(readFileSync(join(snapDir, `${digest}.json`), "utf8")) as SnapshotDoc;
+  if (!/^[0-9a-f]{64}$/.test(digest)) {
+    console.error(`dispatch: snapshot digest must be 64 hex chars (got: ${digest.slice(0, 40)})`);
+    return 2;
+  }
+  const doc = loadSnapshotCorpus(join(snapDir, `${digest}.json`), `snapshot ${digest.slice(0, 12)}`);
 
   const profiles = paths.map((p) => classifyPath(p));
   const artifact = analyzeAgainstSnapshot(profiles, doc);
@@ -61,7 +77,7 @@ function main(): number {
 
   const body = JSON.stringify(artifact, null, 2);
   if (out) {
-    writeFileSync(out, body);
+    writeCorpusAtomic(out, body);
     console.error(`  written: ${out}`);
   } else {
     console.log(body);

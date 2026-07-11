@@ -245,7 +245,7 @@ findings and are the gate for any change.
 
 ## CI
 
-Two workflows under `.github/workflows/` (validated with actionlint):
+Three workflows under `.github/workflows/` (validated with actionlint):
 
 - **lint** — ESLint + the TypeScript compiler across server, shared, and web;
   the same commands as the local gates, so CI and a checkout can never
@@ -260,6 +260,22 @@ Two workflows under `.github/workflows/` (validated with actionlint):
   built frontend is served. Advisory/enrichment sources are disabled in the
   smoke config so only security.ubuntu.com and the npm registries can affect
   the verdict. The smoke runs locally too: `npm run build && npm run smoke`.
+- **codeql** — CodeQL analysis (javascript-typescript, security-and-quality
+  suite) on pushes, PRs, and a weekly schedule. The suite was run locally
+  against this tree with the CodeQL 2.26.0 CLI during development: it found
+  two real path-injection errors on the snapshot digest routes (fixed —
+  digests are now validated as 64-hex content addresses at the store, route,
+  and CLI boundaries, with the path built from the regex capture), plus a
+  missing-rate-limit warning (fixed — `express-rate-limit`, 30 POSTs/min for
+  sync/snapshot builds, 600/min elsewhere). Two findings remain by design
+  and can be dismissed as such in code scanning: `js/file-access-to-http`
+  (outbound URLs come from the config file — that is the product) and
+  `js/http-to-file-access` (fetched InRelease bytes are written to a private
+  temp file precisely so gpgv can verify them).
+
+Lint runs on a Node 22/24 matrix; build, smoke, and the runtime target
+Node 24 (active LTS). The service requires Node >= 22.13 (`node:sqlite`
+unflagged; declared in `engines`).
 
 ## What each distro aggregates
 
@@ -305,6 +321,35 @@ GET  /api/domains/:domain/units/:unit/packages/:name     all sources + joined ad
 GET  /api/domains/:domain/units/:unit/packages/:name/enrich
 POST /api/reload                                         re-read config
 ```
+
+## The corpus boundary
+
+File access and semantic validity are separate functions, by rule
+(`lib/corpus.ts` / `lib/validate.ts`):
+
+1. **File operations are one operation in one direction** — a read is a
+   single read of the entire corpus; a write is a single atomic write of the
+   entire corpus (temp + rename). NDJSON history appends whole records in
+   one operation. Nothing streams, resumes, or read-modify-writes.
+2. **The corpus is parsed into a JSON object after the fact** — parsing is
+   pure and happens only once the read has fully completed.
+3. **The object is validated in code** before anything uses it: every field
+   type-checked, range-checked (ports 1–65535, TTLs 0–8760h, pages bounded,
+   package names ≤214 chars in the allowed charset), URL schemes restricted
+   to http(s), enums enforced, unknown keys rejected as probable typos
+   (`$comment.*` exempt), with field-path-accurate errors
+   (`config.distros[0].index.pockets[0].base: URL scheme must be http(s)`).
+
+This applies to every corpus the service touches: `tidepool.config.json`
+(startup refuses to run on an invalid config, printing every field error;
+`POST /api/reload` refuses invalid configs with a 400 carrying the details
+and keeps serving on the last valid one), stored snapshots (a planted or
+corrupted snapshot fails validation loudly as a 500 naming the fields — the
+service keeps serving), the append-only observation/change history (each
+line validated on read; corruption of the truth log throws with file and
+line), and the gpgv path, which is now three separated functions: one
+whole-corpus write into a private temp dir, one process run, one pure
+verdict interpretation (`interpretGpgvVerdict` is testable without gpg).
 
 ## Design principles
 

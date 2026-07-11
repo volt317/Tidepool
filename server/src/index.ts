@@ -5,8 +5,12 @@
 // core/aggregator.ts; all domain knowledge in domains/.
 
 import express from "express";
-import { existsSync, readFileSync } from "node:fs";
+import rateLimit from "express-rate-limit";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+
+import { parseJsonCorpus, readCorpusText } from "./lib/corpus.js";
+import { validateConfig } from "./lib/validate.js";
 
 import type { TidepoolConfig } from "../../shared/types.js";
 import { Aggregator } from "./core/aggregator.js";
@@ -18,12 +22,24 @@ import { DiskCache } from "./lib/util.js";
 
 const ROOT = resolve(process.env.TIDEPOOL_ROOT || process.cwd());
 
-function loadConfig(): TidepoolConfig {
-  return JSON.parse(readFileSync(join(ROOT, "tidepool.config.json"), "utf8")) as TidepoolConfig;
+/**
+ * Config pipeline, three separated steps: (1) one whole-corpus read;
+ * (2) parse the corpus into a JSON object after the fact; (3) validate the
+ * object in code — types, ranges, URL schemes, enums, unknown keys. Nothing
+ * downstream ever sees an unvalidated value.
+ */
+function loadConfig(): { config?: TidepoolConfig; errors: string[] } {
+  const path = join(ROOT, "tidepool.config.json");
+  let parsed: unknown;
+  try {
+    parsed = parseJsonCorpus(readCorpusText(path), "tidepool.config.json");
+  } catch (e) {
+    return { errors: [String(e instanceof Error ? e.message : e)] };
+  }
+  return validateConfig(parsed);
 }
 
-function build(): { config: TidepoolConfig; router: express.Router } {
-  const config = loadConfig();
+function build(config: TidepoolConfig): { config: TidepoolConfig; router: express.Router } {
   const cacheDir = join(ROOT, config.server.cacheDir ?? ".cache");
   const disk = new DiskCache(cacheDir);
   const inflow = new InflowStore(join(cacheDir, "history"));
@@ -32,10 +48,22 @@ function build(): { config: TidepoolConfig; router: express.Router } {
   return { config, router: buildRouter(agg, inflow, snapshots) };
 }
 
-let current = build();
+const initial = loadConfig();
+if (!initial.config) {
+  console.error("tidepool: refusing to start — tidepool.config.json failed validation:");
+  for (const e of initial.errors) console.error(`  - ${e}`);
+  process.exit(1);
+}
+let current = build(initial.config);
 
 const app = express();
 app.use(express.json());
+
+// self-hosted service, but sync/snapshot POSTs trigger real upstream work —
+// bound how fast anyone can make this machine fetch archives
+const expensive = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: true, legacyHeaders: false });
+const general = rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false });
+app.use("/api", (req, res, next) => (req.method === "POST" ? expensive(req, res, next) : general(req, res, next)));
 
 app.get("/api/config", (_req, res) => {
   const { server, distros, ecosystems, packageHints, enrichment } = current.config;
@@ -49,7 +77,14 @@ app.get("/api/config", (_req, res) => {
 });
 
 app.post("/api/reload", (_req, res) => {
-  current = build();
+  const next = loadConfig();
+  if (!next.config) {
+    // fail closed on the reload, not the service: keep running on the last
+    // valid config and report exactly which fields are wrong
+    res.status(400).json({ error: "config invalid; previous config retained", details: next.errors });
+    return;
+  }
+  current = build(next.config);
   res.json({ ok: true, note: "config reloaded; unit state cleared" });
 });
 
@@ -58,8 +93,8 @@ app.use("/api", (req, res, next) => current.router(req, res, next));
 if (process.env.TIDEPOOL_SERVE_STATIC === "1") {
   const dist = join(ROOT, "web", "dist");
   if (existsSync(dist)) {
-    app.use(express.static(dist));
-    app.get(/^\/(?!api\/).*/, (_req, res) => res.sendFile(join(dist, "index.html")));
+    app.use(general, express.static(dist));
+    app.get(/^\/(?!api\/).*/, general, (_req, res) => res.sendFile(join(dist, "index.html")));
   } else {
     console.warn("TIDEPOOL_SERVE_STATIC=1 but web/dist is missing — run `npm run build` first.");
   }

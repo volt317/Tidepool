@@ -4,6 +4,10 @@
   "type": "module",
   "version": "0.1.0",
   "dependencies": {
-    "express": "^4.19.0"
+    "express": "^4.19.0",
+    "express-rate-limit": "^8.5.2"
+  },
+  "engines": {
+    "node": ">=22.13"
   }
 }

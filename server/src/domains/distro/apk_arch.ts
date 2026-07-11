@@ -161,7 +161,7 @@ export async function syncArchIndex(distroCfg: DistroConfig): Promise<IndexResul
     };
     try {
       let page = 1;
-      let numPages = 1;
+      let numPages: number;
       let count = 0;
       do {
         const url = `${api}?repo=${encodeURIComponent(repo)}&page=${page}`;
