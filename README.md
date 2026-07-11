@@ -243,9 +243,36 @@ The entire codebase is TypeScript against the shared contract in
 `shared/types.ts`. `npm run lint` and `npm run typecheck` pass with zero
 findings and are the gate for any change.
 
+## Testing
+
+Unit tests use `node:test` with Node's native V8 coverage — no test-framework
+dependency, matching the rest of the stack. 49 tests cover the pure spine:
+the dpkg comparator and deb822/InRelease parsers, the corpus boundary and
+every validator error class, pure gpgv verdict interpretation (good / BAD on
+exit 0 / missing key / silent output — the exact stderr shapes observed
+live), canonical digests, all change-detection kinds with observation
+attribution, the heuristic rules' thresholds and non-firing cases, every
+snapshot export format from one doc (including HTML escaping of
+upstream-controlled package names and a tar round-trip through our own
+reader), the contained aggregation flow against stub providers (sync →
+summaries → observations → re-sync change detection → store-only peek), the
+HTTP surface over real sockets (snapshot lifecycle, traversal and format
+guards), config→provider mapping, and the dispatch classifier + analyzer.
+
+```sh
+npm test              # build + run the suite
+npm run test:coverage # + V8 coverage, thresholds enforced, lcov emitted
+```
+
+Coverage stands at ~70% lines / 76% branches / 73% functions, with
+thresholds set just below (65/70/68) so regressions fail the run. The
+uncovered remainder is deliberate and visible in the report: the network
+fetch paths of the collectors (apt/apk/arch, registry surfaces, enrichment
+adapters) are exercised by the live runtime smoke in CI, not by unit tests.
+
 ## CI
 
-Three workflows under `.github/workflows/` (validated with actionlint):
+Four workflows under `.github/workflows/` (validated with actionlint):
 
 - **lint** — ESLint + the TypeScript compiler across server, shared, and web;
   the same commands as the local gates, so CI and a checkout can never
@@ -260,6 +287,8 @@ Three workflows under `.github/workflows/` (validated with actionlint):
   built frontend is served. Advisory/enrichment sources are disabled in the
   smoke config so only security.ubuntu.com and the npm registries can affect
   the verdict. The smoke runs locally too: `npm run build && npm run smoke`.
+- **test** — the unit suite with coverage thresholds on a Node 22/24
+  matrix; the lcov report is uploaded as an artifact.
 - **codeql** — CodeQL analysis (javascript-typescript, security-and-quality
   suite) on pushes, PRs, and a weekly schedule. The suite was run locally
   against this tree with the CodeQL 2.26.0 CLI during development: it found

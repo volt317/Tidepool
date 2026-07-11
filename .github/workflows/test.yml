@@ -1,0 +1,51 @@
+# Unit tests + coverage: node:test with native V8 coverage (no test-framework
+# dependency, matching the project's zero-dep ethos). Thresholds are enforced
+# by the runner itself (lines 65 / branches 70 / functions 68 — set just
+# below achieved so regressions fail); the lcov report is uploaded as an
+# artifact. Network collectors sit intentionally below these numbers — their
+# coverage comes from the live runtime smoke in build.yml, not unit tests.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: unit tests + coverage (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      - name: Install
+        run: |
+          npm ci
+          npm ci --prefix server
+
+      - name: Tests with coverage thresholds
+        run: npm run test:coverage
+
+      - name: Upload lcov
+        if: matrix.node == 24
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          retention-days: 14

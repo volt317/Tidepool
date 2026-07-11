@@ -7,7 +7,7 @@ export default tseslint.config(
   { ignores: ["**/dist/**", "**/node_modules/**", ".cache/**", "server/lib/**", "server/sources/**", "server/index.js"] },
   ...tseslint.configs.recommended,
   {
-    files: ["server/src/**/*.ts", "shared/**/*.ts"],
+    files: ["server/src/**/*.ts", "server/test/**/*.ts", "shared/**/*.ts"],
     rules: {
       "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/consistent-type-imports": "error",

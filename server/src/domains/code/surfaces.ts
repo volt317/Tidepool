@@ -61,7 +61,7 @@ const FINAL_RELEASE = /^\d+(\.\d+)*$/;
 
 // -------------------------------------------------------------- crates.io
 
-function cratesIndexPath(name: string): string {
+export function cratesIndexPath(name: string): string {
   const n = name.toLowerCase();
   if (n.length === 1) return `1/${n}`;
   if (n.length === 2) return `2/${n}`;
@@ -230,7 +230,7 @@ const gemVersionsLatest: Surface = {
 // ------------------------------------------------------------------ Maven
 // Package names are "group:artifact".
 
-function mavenParts(name: string): { g: string; a: string } | null {
+export function mavenParts(name: string): { g: string; a: string } | null {
   const i = name.indexOf(":");
   if (i <= 0 || i === name.length - 1) return null;
   return { g: name.slice(0, i), a: name.slice(i + 1) };
@@ -277,7 +277,7 @@ const mavenSearch: Surface = {
 // Package names are module paths; uppercase letters bang-escape per the
 // module proxy protocol (e.g. github.com/Foo → github.com/!foo).
 
-const goEscape = (mod: string) => mod.replace(/[A-Z]/g, (c) => "!" + c.toLowerCase());
+export const goEscape = (mod: string) => mod.replace(/[A-Z]/g, (c) => "!" + c.toLowerCase());
 
 const goLatest: Surface = {
   id: "latest",
@@ -506,7 +506,7 @@ interface VcpkgVersionFields {
   "port-version"?: number;
 }
 
-function vcpkgVersion(e: VcpkgVersionFields): string | null {
+export function vcpkgVersion(e: VcpkgVersionFields): string | null {
   const v = e.version ?? e["version-semver"] ?? e["version-string"] ?? e["version-date"];
   if (!v) return null;
   const pv = e["port-version"] ?? 0;
