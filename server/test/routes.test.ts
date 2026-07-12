@@ -11,7 +11,8 @@ import express from "express";
 
 import type { PackageRow, SourceRecord, TidepoolConfig } from "../../shared/types.js";
 import { Aggregator, type UnitProvider, type IndexResult, type AdvisoryJoin } from "../src/core/aggregator.js";
-import { InflowStore, digestOf } from "../src/core/inflow.js";
+import { digestOf } from "../src/core/inflow.js";
+import { ObservationStore } from "../src/core/store.js";
 import { SnapshotStore } from "../src/core/snapshot.js";
 import { buildRouter } from "../src/core/routes.js";
 import { DiskCache } from "../src/lib/util.js";
@@ -49,15 +50,16 @@ const j = async (path: string, init?: RequestInit) => {
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), "tp-routes-"));
+  const store = new ObservationStore(join(dir, "data"));
   const agg = new Aggregator(
     [stub("alpha-unit", { express: "5.2.1", lodash: "4.18.1" })],
     new DiskCache(join(dir, "cache")),
     { server: {}, distros: [] } as unknown as TidepoolConfig,
-    new InflowStore(join(dir, "history"))
+    store
   );
   const app = express();
   app.use(express.json());
-  app.use("/api", buildRouter(agg, new InflowStore(join(dir, "history")), new SnapshotStore(join(dir, "snapshots"))));
+  app.use("/api", buildRouter(agg, new SnapshotStore(join(dir, "snapshots"), store)));
   await new Promise<void>((resolve) => {
     server = app.listen(0, "127.0.0.1", resolve);
   });

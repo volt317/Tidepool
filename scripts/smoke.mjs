@@ -209,7 +209,7 @@ try {
   );
   const { spawnSync } = await import("node:child_process");
   const cli = join(process.cwd(), "server", "dist", "server", "src", "cli", "dispatch.js");
-  const run = spawnSync(process.execPath, [cli, "--snapshot", s1.digest, "--store", join(root, ".cache"), proj], {
+  const run = spawnSync(process.execPath, [cli, "--snapshot", s1.digest, "--store", join(root, ".tidepool"), proj], {
     encoding: "utf8",
   });
   rmSync(proj, { recursive: true, force: true });
@@ -219,6 +219,20 @@ try {
     fail(`dispatch missing expected express finding: ${JSON.stringify(artifact.findings.map((f) => f.kind))}`);
   if (artifact.snapshotDigest !== s1.digest) fail("dispatch artifact does not reference the snapshot");
   ok(`dispatch: dependency-update-available for express, artifact ${String(artifact.digest).slice(0, 12)} references snapshot`);
+
+  // 9) portable evidence: export the corpus, dry-run import it elsewhere —
+  //    the bundle must carry the store without any recollection
+  const corpusCli = join(process.cwd(), "server", "dist", "server", "src", "cli", "corpus.js");
+  const exportOut = join(tmpdir(), `tidepool-smoke-corpus-${Date.now()}.tar.zst`);
+  const exp = spawnSync(process.execPath, [corpusCli, "export", "--data", join(root, ".tidepool"), "--out", exportOut], { encoding: "utf8" });
+  if (exp.status !== 0) fail(`corpus export exit ${exp.status}: ${exp.stderr.slice(0, 300)}`);
+  const freshData = mkdtempSync(join(tmpdir(), "tidepool-smoke-import-"));
+  const imp = spawnSync(process.execPath, [corpusCli, "import", "--data", freshData, "--in", exportOut, "--dry-run"], { encoding: "utf8" });
+  rmSync(freshData, { recursive: true, force: true });
+  rmSync(exportOut, { force: true });
+  if (imp.status !== 0) fail(`corpus import dry-run exit ${imp.status}: ${imp.stderr.slice(0, 300)}`);
+  if (!/observations: \+\d/.test(imp.stderr)) fail(`corpus dry-run reported no observations: ${imp.stderr.slice(0, 200)}`);
+  ok("corpus: full export bundled and dry-run imported into a fresh store");
 
   console.log("SMOKE PASS");
   exitCode = 0;

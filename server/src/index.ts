@@ -14,7 +14,7 @@ import { validateConfig } from "./lib/validate.js";
 
 import type { TidepoolConfig } from "../../shared/types.js";
 import { Aggregator } from "./core/aggregator.js";
-import { InflowStore } from "./core/inflow.js";
+import { ObservationStore } from "./core/store.js";
 import { SnapshotStore } from "./core/snapshot.js";
 import { buildRouter } from "./core/routes.js";
 import { buildProviders } from "./domains/providers.js";
@@ -39,13 +39,16 @@ function loadConfig(): { config?: TidepoolConfig; errors: string[] } {
   return validateConfig(parsed);
 }
 
-function build(config: TidepoolConfig): { config: TidepoolConfig; router: express.Router } {
+function build(config: TidepoolConfig): { config: TidepoolConfig; router: express.Router; store: ObservationStore } {
+  // .cache stays a disposable TTL response cache; .tidepool is the durable
+  // evidence store — two directories, two very different contracts
   const cacheDir = join(ROOT, config.server.cacheDir ?? ".cache");
+  const dataDir = join(ROOT, config.server.dataDir ?? ".tidepool");
   const disk = new DiskCache(cacheDir);
-  const inflow = new InflowStore(join(cacheDir, "history"));
-  const snapshots = new SnapshotStore(join(cacheDir, "snapshots"));
-  const agg = new Aggregator(buildProviders(config), disk, config, inflow);
-  return { config, router: buildRouter(agg, inflow, snapshots) };
+  const store = new ObservationStore(dataDir);
+  const snapshots = new SnapshotStore(join(dataDir, "snapshots"), store);
+  const agg = new Aggregator(buildProviders(config), disk, config, store);
+  return { config, router: buildRouter(agg, snapshots), store };
 }
 
 const initial = loadConfig();
@@ -84,6 +87,7 @@ app.post("/api/reload", (_req, res) => {
     res.status(400).json({ error: "config invalid; previous config retained", details: next.errors });
     return;
   }
+  current.store.close();
   current = build(next.config);
   res.json({ ok: true, note: "config reloaded; unit state cleared" });
 });

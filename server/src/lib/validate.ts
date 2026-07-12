@@ -125,7 +125,7 @@ const ECOSYSTEMS = [
 const ADVISORY_KINDS = ["ubuntu-notices", "alpine-secdb", "arch-avg", "osv-on-demand", "none"] as const;
 const CHANGE_KINDS = [
   "package-added", "package-removed", "version-moved", "metadata-changed",
-  "advisory-published", "advisory-modified", "advisory-withdrawn",
+  "advisory-published", "advisory-modified", "advisory-no-longer-observed",
   "source-failure", "source-recovery", "verification-transition", "signer-transition",
 ] as const;
 const STAGES = ["observation", "churn", "interpretive"] as const;
@@ -225,12 +225,14 @@ export function validateConfig(v: unknown): { config?: TidepoolConfig; errors: s
   const root = obj(c, v, "config", ["server", "distros", "ecosystems", "enrichment", "packageHints"]);
   if (!root) return { errors: c.errors };
 
-  const server = obj(c, root.server ?? {}, "config.server", ["port", "cacheDir", "indexTtlHours", "advisoryTtlHours"]);
+  const server = obj(c, root.server ?? {}, "config.server", ["port", "cacheDir", "dataDir", "indexTtlHours", "advisoryTtlHours"]);
   if (server) {
     if (server.port !== undefined) int(c, server.port, "config.server.port", { min: 1, max: 65535 });
-    if (server.cacheDir !== undefined) {
-      const cd = str(c, server.cacheDir, "config.server.cacheDir", { max: 200 });
-      if (cd !== undefined && cd.includes("..")) c.fail("config.server.cacheDir", "must not contain '..'");
+    for (const key2 of ["cacheDir", "dataDir"] as const) {
+      if (server[key2] !== undefined) {
+        const cd = str(c, server[key2], `config.server.${key2}`, { max: 200 });
+        if (cd !== undefined && cd.includes("..")) c.fail(`config.server.${key2}`, "must not contain '..'");
+      }
     }
     if (server.indexTtlHours !== undefined) num(c, server.indexTtlHours, "config.server.indexTtlHours", { min: 0, max: 8760 });
     if (server.advisoryTtlHours !== undefined)
@@ -321,4 +323,29 @@ export function validateSnapshotDoc(v: unknown, where: string): { doc?: Snapshot
   }
   if (v.digest !== undefined) str(c, v.digest, `${where}.digest`, { pattern: HEX64, what: "must be a 64-hex content address" });
   return c.errors.length ? { errors: c.errors } : { doc: v as unknown as SnapshotDoc, errors: [] };
+}
+
+/** Structural validation of an export bundle manifest. */
+export function validateExportManifest(v2: unknown, where: string): { manifest?: Record<string, unknown>; errors: string[] } {
+  const c = new Ctx();
+  if (typeof v2 !== "object" || v2 === null || Array.isArray(v2)) return { errors: [`${where}: expected object`] };
+  const o = v2 as Record<string, unknown>;
+  str(c, o.tidepoolVersion, `${where}.tidepoolVersion`, { max: 40 });
+  enumOf(c, o.mode, `${where}.mode`, ["full", "thin"] as const);
+  str(c, o.exportedAt, `${where}.exportedAt`, { max: 40 });
+  str(c, o.databaseDigest, `${where}.databaseDigest`, { pattern: HEX64, what: "must be a 64-hex digest" });
+  const migs = arr(c, o.migrations, `${where}.migrations`, { min: 1, max: 1000 });
+  migs?.forEach((m, i) => {
+    if (!Array.isArray(m) || m.length !== 2) c.fail(`${where}.migrations[${i}]`, "expected [version, digest]");
+    else {
+      int(c, m[0], `${where}.migrations[${i}][0]`, { min: 1, max: 9999 });
+      str(c, m[1], `${where}.migrations[${i}][1]`, { pattern: HEX64, what: "must be a 64-hex digest" });
+    }
+  });
+  arr(c, o.objectDigests, `${where}.objectDigests`)?.forEach((d, i) =>
+    str(c, d, `${where}.objectDigests[${i}]`, { pattern: HEX64, what: "must be a 64-hex digest" })
+  );
+  arr(c, o.sources, `${where}.sources`);
+  arr(c, o.snapshotIds, `${where}.snapshotIds`);
+  return c.errors.length ? { errors: c.errors } : { manifest: o, errors: [] };
 }

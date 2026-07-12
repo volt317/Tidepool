@@ -27,25 +27,32 @@ import type {
   SnapshotSourceCoverage,
   SnapshotStage,
 } from "../../../shared/types.js";
-import { digestOf, runHeuristics, stableStringify, type InflowStore } from "./inflow.js";
-import type { Aggregator, UnitProvider } from "./aggregator.js";
+import { digestOf, runHeuristics, stableStringify, type AdvisoryRecordLite, type IndexRecordLite } from "./inflow.js";
+import { debCompare, tarWrite } from "../lib/util.js";
+import type { ObservationStore } from "./store.js";
+import type { UnitProvider } from "./aggregator.js";
 
 export const GENERATOR_VERSION = "1";
 
 export interface SnapshotInputs {
   providers: UnitProvider[];
-  inflow: InflowStore;
-  aggregator: Aggregator;
+  store: ObservationStore;
   stage: SnapshotStage;
   windowHours: number;
   /** explicit window overrides windowHours — required for exact reproduction */
   window?: { from: number; to: number };
 }
 
+/**
+ * Build a snapshot by HISTORICAL RECONSTRUCTION from the observation store:
+ * for every configured source, the latest observation at or before window.to
+ * defines its state; later observations are invisible. The aggregator's
+ * in-memory state is never consulted, so rebuilding an old window after
+ * newer synchronization yields the identical document and digest.
+ */
 export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
   const now = Date.now();
   const window = inp.window ?? { from: now - inp.windowHours * 3600 * 1000, to: now };
-  const inWindow = (t: number) => t >= window.from && t <= window.to;
 
   const coverage: SnapshotSourceCoverage[] = [];
   const observations: Observation[] = [];
@@ -55,63 +62,61 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
   const ambiguities: string[] = [];
 
   for (const p of inp.providers) {
-    const allObs = inp.inflow.observations(p.domain, p.id);
-    const windowObs = allObs.filter((o) => inWindow(o.collectedAt));
-    observations.push(...windowObs);
-
-    // coverage: latest observation per source (inside or before the window)
-    const bySource = new Map<string, Observation>();
-    for (const o of allObs) if (o.collectedAt <= window.to) bySource.set(o.sourceId, o);
-    if (bySource.size === 0) {
+    const recon = inp.store.buildSnapshotInputs(p.domain, p.id, window);
+    if (recon.length === 0) {
       notObserved.push(`${p.domain}/${p.id}: no observations exist — unit never synced`);
+      continue;
     }
-    for (const [sourceId, o] of bySource) {
-      coverage.push({
+    observations.push(...inp.store.observationsFor(p.domain, p.id, window));
+    if (inp.stage !== "observation") {
+      changes.push(...inp.store.changesFor(p.domain, p.id, window));
+    }
+
+    // reconstruct the unit's merged state as it was known at window.to
+    const versionsByName = new Map<string, Record<string, string>>();
+    const advisoriesByName = new Map<string, number>();
+    for (const src of recon) {
+      coverage.push({ ...src.coverage, authority: src.coverage.authority || p.label });
+      if (src.observation?.status === "error") {
+        notObserved.push(`${p.domain}/${p.id}/${src.sourceType}: latest collection at the boundary failed (${src.observation.error ?? "unknown"})`);
+      }
+      if (src.coverage.status === "unobserved") {
+        notObserved.push(`${p.domain}/${p.id}/${src.sourceType}: never observed at or before the window boundary`);
+      }
+      for (const lim of src.coverage.limitations) notObserved.push(`${p.domain}/${p.id}/${src.sourceType}: ${lim}`);
+
+      const suffix = src.sourceType.includes(":") ? src.sourceType.slice(src.sourceType.indexOf(":") + 1) : src.sourceType;
+      if (src.recordKind === "index") {
+        for (const r of src.records as IndexRecordLite[]) {
+          const v = versionsByName.get(r.name) ?? {};
+          v[suffix] = r.version;
+          versionsByName.set(r.name, v);
+        }
+      } else {
+        for (const r of src.records as AdvisoryRecordLite[]) {
+          advisoriesByName.set(r.package, (advisoriesByName.get(r.package) ?? 0) + 1);
+        }
+      }
+    }
+    for (const [name, versions] of [...versionsByName].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const vals = Object.values(versions);
+      const current = vals.reduce((best, v) => (best === null || debCompare(v, best) > 0 ? v : best), null as string | null);
+      const drift = new Set(vals).size > 1;
+      entities.push({
         domain: p.domain,
         unit: p.id,
-        authority: p.label,
-        sourceId,
-        status: o.status,
-        verification: o.verification,
-        signedBy: o.signedBy,
-        recordCount: o.recordCount,
-        collectedAt: o.collectedAt,
-        error: o.error ?? null,
-        limitations: o.coverage.limitations,
+        name,
+        source: name,
+        versions,
+        current,
+        drift,
+        advisoryCount: advisoriesByName.get(name) ?? 0,
       });
-      if (o.status === "error") {
-        notObserved.push(`${p.domain}/${p.id}/${sourceId}: latest collection failed (${o.error ?? "unknown"})`);
-      }
-      for (const lim of o.coverage.limitations) {
-        notObserved.push(`${p.domain}/${p.id}/${sourceId}: ${lim}`);
-      }
-    }
-
-    if (inp.stage !== "observation") {
-      changes.push(...inp.inflow.changes(p.domain, p.id).filter((c) => inWindow(c.detectedAt)));
-    }
-
-    // entities: current merged state, served from the aggregator's store-backed state
-    const st = await inp.aggregator.peek(p);
-    if (st) {
-      const page = inp.aggregator.packages(p, st, { per: 500000, page: 1 });
-      for (const s of page.items) {
-        entities.push({
-          domain: p.domain,
-          unit: p.id,
-          name: s.name,
-          source: s.source,
-          versions: s.versions,
-          current: s.current,
-          drift: s.drift,
-          advisoryCount: s.advisoryCount,
-        });
-      }
     }
   }
 
-  // relationships (churn+): a version movement and an advisory event on the
-  // same package inside the window are related — the security-response join.
+  // relationships (churn+): advisory activity and a version movement on the
+  // same package inside the window — the security-response join
   const relationships: SnapshotDoc["relationships"] = [];
   if (inp.stage !== "observation") {
     const advisoryPkgs = new Map<string, ChangeRecord>();
@@ -131,7 +136,6 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
         });
       }
     }
-    // binary↔source name join ambiguity is structural for apt advisories
     if (coverage.some((c) => c.sourceId === "advisories:ubuntu-notices" && c.status === "ok")) {
       ambiguities.push(
         "apt advisory joins match on both binary and source package names; a notice naming only a source package attaches to the source name"
@@ -139,8 +143,7 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
     }
   }
 
-  const findings =
-    inp.stage === "interpretive" ? runHeuristics({ window, observations, changes }) : [];
+  const findings = inp.stage === "interpretive" ? runHeuristics({ window, observations, changes }) : [];
   for (const f of findings) ambiguities.push(...f.ambiguities.map((a) => `${f.ruleId}: ${a}`));
 
   const doc: SnapshotDoc = {
@@ -163,9 +166,7 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
     findings,
     ambiguities: [...new Set(ambiguities)],
   };
-  // the digest binds content (window, coverage, entities, observations,
-  // changes, findings) — not the generation wall-clock, so rebuilding the
-  // same explicit window from the same store yields the same digest.
+  // the digest binds content, not wall-clock: same window + same store ⇒ same digest
   doc.digest = digestOf({ ...doc, createdAt: 0 });
   return doc;
 }
@@ -176,13 +177,30 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
 const DIGEST_RE = /^([0-9a-f]{64})$/;
 
 export class SnapshotStore {
-  constructor(private root: string) {
+  constructor(
+    private root: string,
+    private manifests?: ObservationStore
+  ) {
     mkdirSync(root, { recursive: true });
   }
   save(doc: SnapshotDoc): string {
     const digest = doc.digest ?? digestOf(doc);
     const path = join(this.root, `${digest}.json`);
     if (!existsSync(path)) writeCorpusAtomic(path, stableStringify(doc)); // one whole-corpus write
+    // snapshot manifests are immutable rows joining the exact observation,
+    // change, and finding sets the document was built from
+    this.manifests?.recordSnapshotManifest({
+      digest,
+      window: doc.window,
+      createdAt: doc.createdAt,
+      scope: doc.scope,
+      notObserved: doc.notObserved,
+      ambiguities: doc.ambiguities,
+      observations: doc.observations,
+      changes: doc.changes,
+      findings: doc.findings,
+      bundlePath: `snapshots/${digest}.json`,
+    });
     return digest;
   }
   load(digest: string): SnapshotDoc | null {
@@ -408,31 +426,6 @@ function toSqlite(doc: SnapshotDoc): Buffer {
   }
 }
 
-/** Minimal ustar writer for the archive bundle (we already read ustar). */
-function tarWrite(entries: { name: string; data: Buffer }[]): Buffer {
-  const blocks: Buffer[] = [];
-  for (const e of entries) {
-    const header = Buffer.alloc(512);
-    header.write(e.name, 0, 100, "utf8");
-    header.write("0000644\0", 100, 8, "utf8"); // mode
-    header.write("0000000\0", 108, 8, "utf8"); // uid
-    header.write("0000000\0", 116, 8, "utf8"); // gid
-    header.write(e.data.length.toString(8).padStart(11, "0") + "\0", 124, 12, "utf8");
-    header.write(Math.floor(Date.now() / 1000).toString(8).padStart(11, "0") + "\0", 136, 12, "utf8");
-    header.write("        ", 148, 8, "utf8"); // checksum placeholder = spaces
-    header[156] = 0x30; // '0' regular file
-    header.write("ustar\0", 257, 6, "utf8");
-    header.write("00", 263, 2, "utf8");
-    let sum = 0;
-    for (const b of header) sum += b;
-    header.write(sum.toString(8).padStart(6, "0") + "\0 ", 148, 8, "utf8");
-    blocks.push(header, e.data);
-    const pad = 512 - (e.data.length % 512 || 512);
-    if (pad > 0 && pad < 512) blocks.push(Buffer.alloc(pad));
-  }
-  blocks.push(Buffer.alloc(1024)); // end-of-archive
-  return Buffer.concat(blocks);
-}
 
 function toBundle(doc: SnapshotDoc): Buffer {
   const digest = (doc.digest ?? "snapshot").slice(0, 16);

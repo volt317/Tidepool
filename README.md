@@ -351,6 +351,58 @@ GET  /api/domains/:domain/units/:unit/packages/:name/enrich
 POST /api/reload                                         re-read config
 ```
 
+## The observation store
+
+Persistence is an insert-mostly SQLite accumulated-awareness layer under
+`.tidepool/` — durable local memory of upstream inflow, not a disposable
+response cache (the TTL serving cache stays separate in `.cache/`, with a
+deliberately opposite contract):
+
+```
+.tidepool/
+├── tidepool.sqlite3        WAL, synchronous=NORMAL, foreign keys ON,
+│                           busy_timeout 5s, incremental auto-vacuum
+├── objects/sha256/xx/…     content-addressed normalized record corpora
+├── snapshots/              snapshot documents (manifest rows join contents)
+├── exports/                portable evidence bundles
+└── locks/
+```
+
+Invariant: one Tidepool writer process owns a local database; collectors
+fetch concurrently but every normalized write passes through the
+ObservationStore's `BEGIN IMMEDIATE` transaction (artifact → observation →
+entities/states → changes → head). Schema lives in ordered migrations
+(`server/migrations/000N_*.sql`) applied transactionally and recorded in a
+ledger with content digests — drifted history refuses to run; nothing is
+inferred from whether a table happens to exist.
+
+Terminology is deliberate: artifacts and normalized record sets are
+**content-addressed**; observations are **deterministically identified**
+(the collection timestamp participates in identity — an unchanged source
+still yields a new observation, because learning it was still there is
+knowledge). Identical content is stored once; entity states materialize
+only when a source's normalized digest is new. Failures, coverage limits,
+and verification levels are columns, not log lines. Bounded advisory feeds
+never produce "withdrawn" — only `advisory-no-longer-observed`.
+
+**Historical reconstruction**: snapshots are rebuilt from SQLite at the
+window boundary — the latest observation at or before `window.to` per
+source, later ones invisible, aggregator memory never consulted — so an old
+snapshot rebuilds to the identical digest after any amount of newer
+synchronization (test-proven). Source heads exist only to accelerate
+current-state reads.
+
+**Portable evidence**: `corpus export` produces a `tar.zst` bundle
+(manifest, backup-API database copy — never a raw WAL copy — objects,
+snapshot documents, checksums); `--snapshot <digest>` yields a thin bundle
+carrying only the objects those snapshots reference. `corpus import`
+validates the manifest, verifies every checksum, inspects schema
+compatibility via the migration ledger (newer schemas refused), merges
+immutable rows without ever silently replacing conflicting history, records
+the import in a ledger, and supports `--dry-run`. Retention: nothing is
+deleted by default; compaction is a documented later feature and must stay
+explicit, logged, and reversible.
+
 ## The corpus boundary
 
 File access and semantic validity are separate functions, by rule
@@ -410,6 +462,12 @@ verdict interpretation (`interpretGpgvVerdict` is testable without gpg).
 | Dispatch findings | 6 of the listed kinds emitted; migration-likely / compatibility-review / already-mitigated need richer local analysis and are not yet emitted |
 | Dispatch artifact: immutable, snapshot-referencing, reproducible | implemented |
 | Console rendering of observations/changes/snapshots | not yet — API + CLI complete; the UI still renders current state only |
+| SQLite observation store: migrations, sources, artifacts, observations, entities/states, heads, changes | implemented (milestones 1–8) |
+| Historical queries + snapshot reconstruction from SQLite | implemented (9–10); old-window digest identity test-proven |
+| Backup-API export, full + thin evidence bundles, safe import | implemented (11–12) with dry-run, checksum, schema-ledger, and conflict-retention guarantees |
+| Milestone test classes 13–16 | implemented (dedup, failure/recovery, old-snapshot immutability, offline load) |
+| Evidence / relationships / finding-join tables | schema present (0002); only findings are written today (at snapshot persist) — evidence extraction is the seam |
+| Two-stage collection/analysis transactions, retention policies, compaction | deferred by design |
 | "Do not restrict collection to relevance" | collection is scope-bounded by config (whole archives for distros; declared sets for registries); registry-wide enumeration remains the documented scope.mode seam |
 
 ## Known limitations

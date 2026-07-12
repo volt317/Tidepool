@@ -258,6 +258,7 @@ export interface TidepoolConfig {
   server: {
     port?: number;
     cacheDir?: string;
+    dataDir?: string;
     indexTtlHours?: number;
     advisoryTtlHours?: number;
   };
@@ -312,7 +313,7 @@ export type ChangeKind =
   | "metadata-changed"
   | "advisory-published"
   | "advisory-modified"
-  | "advisory-withdrawn"
+  | "advisory-no-longer-observed"
   | "source-failure"
   | "source-recovery"
   | "verification-transition"

@@ -33,7 +33,7 @@ function arg(name: string): string | null {
 }
 
 function main(): number {
-  const storeDir = resolve(arg("--store") ?? join(process.env.TIDEPOOL_ROOT ?? process.cwd(), ".cache"));
+  const storeDir = resolve(arg("--store") ?? join(process.env.TIDEPOOL_ROOT ?? process.cwd(), ".tidepool"));
   const snapDir = join(storeDir, "snapshots");
   const wanted = arg("--snapshot") ?? "latest";
   const out = arg("--out");

@@ -6,7 +6,6 @@
 
 import { Router } from "express";
 import type { Aggregator } from "./aggregator.js";
-import type { InflowStore } from "./inflow.js";
 import { buildSnapshot, exportSnapshot, type ExportFormat, type SnapshotStore } from "./snapshot.js";
 import type { SnapshotStage } from "../../../shared/types.js";
 
@@ -14,7 +13,7 @@ const STAGES: SnapshotStage[] = ["observation", "churn", "interpretive"];
 const DIGEST_PARAM = /^([0-9a-f]{64})$/;
 const FORMATS: ExportFormat[] = ["json", "ndjson", "md", "html", "sqlite", "bundle"];
 
-export function buildRouter(agg: Aggregator, inflow: InflowStore, snapshots: SnapshotStore): Router {
+export function buildRouter(agg: Aggregator, snapshots: SnapshotStore): Router {
   const r = Router();
 
   r.get("/domains", (_req, res) => {
@@ -117,7 +116,7 @@ export function buildRouter(agg: Aggregator, inflow: InflowStore, snapshots: Sna
       res.status(404).json({ error: "unknown unit" });
       return;
     }
-    res.json({ observations: inflow.observations(p.domain, p.id) });
+    res.json({ observations: agg.store.observationsFor(p.domain, p.id) });
   });
 
   r.get("/domains/:domain/units/:unit/changes", (req, res) => {
@@ -126,7 +125,7 @@ export function buildRouter(agg: Aggregator, inflow: InflowStore, snapshots: Sna
       res.status(404).json({ error: "unknown unit" });
       return;
     }
-    res.json({ changes: inflow.changes(p.domain, p.id) });
+    res.json({ changes: agg.store.changesFor(p.domain, p.id) });
   });
 
   // ---------------------------------------------------------- snapshots
@@ -143,8 +142,7 @@ export function buildRouter(agg: Aggregator, inflow: InflowStore, snapshots: Sna
         req.body?.from && req.body?.to ? { from: Number(req.body.from), to: Number(req.body.to) } : undefined;
       const doc = await buildSnapshot({
         providers: agg.allProviders(),
-        inflow,
-        aggregator: agg,
+        store: agg.store,
         stage,
         windowHours,
         window: explicit,

@@ -3,20 +3,18 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import type { Observation } from "../../shared/types.js";
 import {
   stableStringify,
   digestOf,
-  makeObservation,
   detectChanges,
   runHeuristics,
-  InflowStore,
   type IndexRecordLite,
 } from "../src/core/inflow.js";
+
+/** local observation fixture — identity assignment is the store's concern
+ *  now (see store.test.ts); detectChanges only needs a well-formed DTO */
+const mkObs = (fields: Omit<Observation, "id">): Observation => ({ id: digestOf(fields), ...fields });
 
 // ------------------------------------------------------- canonical digests
 
@@ -48,21 +46,13 @@ const obsFields = (over: Partial<Omit<Observation, "id">> = {}): Omit<Observatio
   ...over,
 });
 
-test("makeObservation ids are deterministic and content-sensitive", () => {
-  const a = makeObservation(obsFields());
-  const b = makeObservation(obsFields());
-  assert.equal(a.id, b.id, "same fields → same id");
-  assert.notEqual(a.id, makeObservation(obsFields({ collectedAt: 1700000000001 })).id, "time is part of identity");
-  assert.notEqual(a.id, makeObservation(obsFields({ recordsDigest: "e".repeat(64) })).id);
-});
-
 // --------------------------------------------------------- change detection
 
 const rec = (name: string, version: string, meta = "main|libs"): IndexRecordLite => ({ name, version, meta });
 
 test("detectChanges: added, removed, moved, metadata — attributed to the pair", () => {
-  const prev = makeObservation(obsFields({ recordsDigest: "1".repeat(64) }));
-  const next = makeObservation(obsFields({ recordsDigest: "2".repeat(64), collectedAt: 1700000001000 }));
+  const prev = mkObs(obsFields({ recordsDigest: "1".repeat(64) }));
+  const next = mkObs(obsFields({ recordsDigest: "2".repeat(64), collectedAt: 1700000001000 }));
   const changes = detectChanges(
     prev,
     next,
@@ -84,31 +74,31 @@ test("detectChanges: added, removed, moved, metadata — attributed to the pair"
 });
 
 test("detectChanges: identical recordsDigest short-circuits to zero changes", () => {
-  const prev = makeObservation(obsFields());
-  const next = makeObservation(obsFields({ collectedAt: 1700000001000 }));
+  const prev = mkObs(obsFields());
+  const next = mkObs(obsFields({ collectedAt: 1700000001000 }));
   const changes = detectChanges(prev, next, [rec("a", "1.0")], [rec("a", "9.9")], "index");
   assert.equal(changes.length, 0, "equal digests mean equal content by contract; records are not even consulted");
 });
 
 test("detectChanges: first sight fabricates nothing; failure/recovery transition", () => {
-  const first = makeObservation(obsFields());
+  const first = mkObs(obsFields());
   assert.equal(detectChanges(null, first, [], [rec("a", "1.0")], "index").length, 0, "no prior = no per-record changes");
 
-  const ok = makeObservation(obsFields());
-  const failed = makeObservation(obsFields({ status: "error", error: "HTTP 503", recordsDigest: digestOf([]), collectedAt: 1700000002000 }));
+  const ok = mkObs(obsFields());
+  const failed = mkObs(obsFields({ status: "error", error: "HTTP 503", recordsDigest: digestOf([]), collectedAt: 1700000002000 }));
   const f = detectChanges(ok, failed, [rec("a", "1.0")], [], "index");
   assert.equal(f.length, 1);
   assert.equal(f[0].kind, "source-failure");
 
-  const recovered = makeObservation(obsFields({ collectedAt: 1700000003000 }));
+  const recovered = mkObs(obsFields({ collectedAt: 1700000003000 }));
   const r = detectChanges(failed, recovered, [], [rec("a", "1.0")], "index");
   assert.equal(r[0].kind, "source-recovery");
   assert.equal(r.length, 1, "recovery does not fabricate per-record adds against an error observation");
 });
 
 test("detectChanges: verification and signer transitions", () => {
-  const signed = makeObservation(obsFields({ verification: "signature+digest", signedBy: ["Key A <a@x>"] }));
-  const digestOnly = makeObservation(
+  const signed = mkObs(obsFields({ verification: "signature+digest", signedBy: ["Key A <a@x>"] }));
+  const digestOnly = mkObs(
     obsFields({ verification: "digest", signedBy: [], collectedAt: 1700000004000 })
   );
   const kinds = detectChanges(signed, digestOnly, [rec("a", "1")], [rec("a", "1")], "index").map((c) => c.kind).sort();
@@ -116,8 +106,8 @@ test("detectChanges: verification and signer transitions", () => {
 });
 
 test("detectChanges: advisory publication, modification, withdrawal", () => {
-  const prev = makeObservation(obsFields({ sourceId: "advisories:test", recordsDigest: "3".repeat(64) }));
-  const next = makeObservation(obsFields({ sourceId: "advisories:test", recordsDigest: "4".repeat(64), collectedAt: 1700000005000 }));
+  const prev = mkObs(obsFields({ sourceId: "advisories:test", recordsDigest: "3".repeat(64) }));
+  const next = mkObs(obsFields({ sourceId: "advisories:test", recordsDigest: "4".repeat(64), collectedAt: 1700000005000 }));
   const changes = detectChanges(
     prev,
     next,
@@ -134,31 +124,7 @@ test("detectChanges: advisory publication, modification, withdrawal", () => {
     "advisory"
   );
   const kinds = changes.map((c) => `${c.kind}:${c.package}`).sort();
-  assert.deepEqual(kinds, ["advisory-modified:openssl", "advisory-published:zlib", "advisory-withdrawn:curl"]);
-});
-
-// -------------------------------------------------------------------- store
-
-test("InflowStore: append-only round trip; content-addressed records dedupe", () => {
-  const dir = mkdtempSync(join(tmpdir(), "tp-inflow-"));
-  try {
-    const store = new InflowStore(dir);
-    const blob1 = store.putRecords([rec("a", "1.0")]);
-    const blob2 = store.putRecords([rec("a", "1.0")]);
-    assert.equal(blob1.digest, blob2.digest, "identical records → one blob");
-    assert.deepEqual(store.getRecords(blob1.digest), [rec("a", "1.0")]);
-    assert.equal(store.getRecords("../../../etc/passwd"), null, "non-hex digests never touch the path");
-
-    const o1 = makeObservation(obsFields({ recordsDigest: blob1.digest }));
-    store.appendObservation(o1);
-    const o2 = makeObservation(obsFields({ recordsDigest: blob1.digest, collectedAt: 1700000009000 }));
-    store.appendObservation(o2);
-    assert.equal(store.observations("code", "npm").length, 2);
-    assert.equal(store.previousOf(obsFields({ collectedAt: 1700000010000, recordsDigest: blob1.digest }))?.id, o2.id);
-    assert.equal(store.changes("code", "npm").length, 0);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  assert.deepEqual(kinds, ["advisory-modified:openssl", "advisory-no-longer-observed:curl", "advisory-published:zlib"]);
 });
 
 // --------------------------------------------------------------- heuristics

@@ -26,13 +26,8 @@ import type {
 import type { DiskCache } from "../lib/util.js";
 import { debCompare } from "../lib/util.js";
 import { eolForSlug, githubReleases, osvForPackage, type EnrichRecordT } from "./enrich.js";
-import {
-  detectChanges,
-  makeObservation,
-  type AdvisoryRecordLite,
-  type IndexRecordLite,
-  type InflowStore,
-} from "./inflow.js";
+import type { AdvisoryRecordLite, IndexRecordLite } from "./inflow.js";
+import type { ObservationStore } from "./store.js";
 
 export interface IndexResult {
   sources: SourceRecord[];
@@ -107,12 +102,12 @@ export class Aggregator {
   private disk: DiskCache;
   private config: TidepoolConfig;
 
-  private inflow: InflowStore;
+  readonly store: ObservationStore;
 
-  constructor(providers: UnitProvider[], disk: DiskCache, config: TidepoolConfig, inflow: InflowStore) {
+  constructor(providers: UnitProvider[], disk: DiskCache, config: TidepoolConfig, store: ObservationStore) {
     this.disk = disk;
     this.config = config;
-    this.inflow = inflow;
+    this.store = store;
     for (const p of providers) this.providers.set(key(p.domain, p.id), p);
   }
 
@@ -177,8 +172,9 @@ export class Aggregator {
     return { records, kind: "index" };
   }
 
-  /** Append one immutable observation per source and detect changes against
-   *  the previous observation of that source. Never mutates prior history. */
+  /** One immutable observation per source, committed atomically by the
+   *  ObservationStore (artifact → observation → entities/states → changes →
+   *  head). History is never rewritten. */
   private recordInflow(
     p: UnitProvider,
     sources: SourceRecord[],
@@ -188,34 +184,28 @@ export class Aggregator {
   ): void {
     for (const source of sources) {
       const { records, kind } = this.sourceRecords(source, packages, byPackage);
-      const effective = source.status === "ok" ? records : [];
-      const blob = this.inflow.putRecords(effective);
       const limitations: string[] = [];
       if (source.note) limitations.push(source.note);
-      const fields = {
+      this.store.recordCollection({
         domain: p.domain,
-        unit: p.id,
+        unitId: p.id,
+        unitKind: p.kind,
         authority: p.label,
-        sourceId: source.id,
-        collectedAt,
+        sourceType: source.id,
+        canonicalUrl: source.urls?.[0] ?? null,
         scope: source.label,
-        verification: source.verified ?? null,
-        signedBy: source.signedBy,
-        status: (source.status === "ok" ? "ok" : "error") as "ok" | "error",
+        collectedAt,
+        status: source.status === "ok" ? "ok" : "error",
         error: source.error ?? null,
-        coverage: { observed: blob.count, limitations },
-        artifactDigest: source.artifactDigest ?? null,
+        verification: source.verified ?? null,
+        signedBy: source.signedBy ?? [],
+        limitations,
+        rawArtifactDigest: source.artifactDigest ?? null,
         parserVersion: p.parserVersion,
         configVersion: p.configVersion,
-        recordsDigest: blob.digest,
-        recordCount: blob.count,
-      };
-      const prev = this.inflow.previousOf(fields);
-      const obs = makeObservation(fields);
-      this.inflow.appendObservation(obs);
-      const prevRecords = prev ? this.inflow.getRecords(prev.recordsDigest) ?? [] : [];
-      const changes = detectChanges(prev, obs, prevRecords, effective, kind);
-      this.inflow.appendChanges(p.domain, p.id, changes);
+        recordKind: kind,
+        records,
+      });
     }
   }
 

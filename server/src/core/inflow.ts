@@ -15,11 +15,6 @@
 //     ids, confidence basis, evidence references, and ambiguities. They
 //     never touch the observation log.
 
-import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-
-import { appendCorpus, parseJsonCorpus, readCorpusText, writeCorpusAtomic } from "../lib/corpus.js";
-import { validateChange, validateObservation } from "../lib/validate.js";
 
 import type { ChangeKind, ChangeRecord, HeuristicFinding, Observation } from "../../../shared/types.js";
 import { sha256hex } from "../lib/util.js";
@@ -38,101 +33,6 @@ export function stableStringify(v: unknown): string {
 }
 
 export const digestOf = (v: unknown): string => sha256hex(Buffer.from(stableStringify(v)));
-
-// -------------------------------------------------------------------- store
-
-/** Append-only history: observations + changes per unit, records as blobs. */
-export class InflowStore {
-  constructor(private root: string) {
-    mkdirSync(join(root, "records"), { recursive: true });
-  }
-
-  private unitDir(domain: string, unit: string): string {
-    const d = join(this.root, "units", `${domain}--${unit}`);
-    mkdirSync(d, { recursive: true });
-    return d;
-  }
-
-  putRecords(records: unknown): { digest: string; count: number } {
-    const body = stableStringify(records);
-    const digest = sha256hex(Buffer.from(body));
-    const path = join(this.root, "records", `${digest}.json`);
-    if (!existsSync(path)) writeCorpusAtomic(path, body); // one whole-corpus write
-    const count = Array.isArray(records) ? records.length : Object.keys(records as object).length;
-    return { digest, count };
-  }
-
-  getRecords<T = unknown>(digest: string): T | null {
-    const m = /^([0-9a-f]{64})$/.exec(digest);
-    if (!m) return null;
-    const path = join(this.root, "records", `${m[1]}.json`);
-    if (!existsSync(path)) return null;
-    return parseJsonCorpus(readCorpusText(path), `records ${m[1].slice(0, 12)}`) as T;
-  }
-
-  appendObservation(obs: Observation): void {
-    appendCorpus(join(this.unitDir(obs.domain, obs.unit), "observations.ndjson"), JSON.stringify(obs) + "\n");
-  }
-
-  appendChanges(domain: string, unit: string, changes: ChangeRecord[]): void {
-    if (changes.length === 0) return;
-    appendCorpus(
-      join(this.unitDir(domain, unit), "changes.ndjson"),
-      changes.map((c) => JSON.stringify(c)).join("\n") + "\n"
-    );
-  }
-
-  observations(domain: string, unit: string): Observation[] {
-    const path = join(this.unitDir(domain, unit), "observations.ndjson");
-    if (!existsSync(path)) return [];
-    // one whole-corpus read; parse and validate each record in code —
-    // corruption of the append-only truth log is loud, never skipped
-    return readCorpusText(path)
-      .split("\n")
-      .filter(Boolean)
-      .map((l, n) => {
-        const v = validateObservation(parseJsonCorpus(l, `${domain}/${unit} observations line ${n + 1}`), `${domain}/${unit} observations line ${n + 1}`);
-        if (!v.obs) throw new Error(`history corrupt: ${v.errors[0]}`);
-        return v.obs;
-      });
-  }
-
-  changes(domain: string, unit: string): ChangeRecord[] {
-    const path = join(this.unitDir(domain, unit), "changes.ndjson");
-    if (!existsSync(path)) return [];
-    return readCorpusText(path)
-      .split("\n")
-      .filter(Boolean)
-      .map((l, n) => {
-        const v = validateChange(parseJsonCorpus(l, `${domain}/${unit} changes line ${n + 1}`), `${domain}/${unit} changes line ${n + 1}`);
-        if (!v.change) throw new Error(`history corrupt: ${v.errors[0]}`);
-        return v.change;
-      });
-  }
-
-  /** newest prior observation of the same source, if any */
-  previousOf(obs: Omit<Observation, "id">): Observation | null {
-    const all = this.observations(obs.domain, obs.unit).filter((o) => o.sourceId === obs.sourceId);
-    return all.length ? all[all.length - 1] : null;
-  }
-}
-
-// -------------------------------------------------------------- observation
-
-export function makeObservation(fields: Omit<Observation, "id">): Observation {
-  const id = digestOf({
-    v: INFLOW_SCHEMA_VERSION,
-    domain: fields.domain,
-    unit: fields.unit,
-    sourceId: fields.sourceId,
-    collectedAt: fields.collectedAt,
-    recordsDigest: fields.recordsDigest,
-    configVersion: fields.configVersion,
-    parserVersion: fields.parserVersion,
-    status: fields.status,
-  });
-  return { id, ...fields };
-}
 
 // ---------------------------------------------------------- change detection
 
@@ -235,7 +135,9 @@ export function detectChanges(
     }
     for (const [, rec] of a) {
       if (!b.has(`${rec.package}\u0000${rec.id}`))
-        out.push(change(base, "advisory-withdrawn", { package: rec.package, from: rec.id }));
+        // bounded feeds cannot prove withdrawal — only that the advisory is no
+        // longer inside the configured observation window
+        out.push(change(base, "advisory-no-longer-observed", { package: rec.package, from: rec.id }));
     }
   }
   return out;

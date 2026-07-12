@@ -194,3 +194,29 @@ export class DiskCache {
     renameSync(tmp, p); // write-then-rename: never a torn cache file
   }
 }
+
+/** Minimal ustar writer for the archive bundle (we already read ustar). */
+export function tarWrite(entries: { name: string; data: Buffer }[]): Buffer {
+  const blocks: Buffer[] = [];
+  for (const e of entries) {
+    const header = Buffer.alloc(512);
+    header.write(e.name, 0, 100, "utf8");
+    header.write("0000644\0", 100, 8, "utf8"); // mode
+    header.write("0000000\0", 108, 8, "utf8"); // uid
+    header.write("0000000\0", 116, 8, "utf8"); // gid
+    header.write(e.data.length.toString(8).padStart(11, "0") + "\0", 124, 12, "utf8");
+    header.write(Math.floor(Date.now() / 1000).toString(8).padStart(11, "0") + "\0", 136, 12, "utf8");
+    header.write("        ", 148, 8, "utf8"); // checksum placeholder = spaces
+    header[156] = 0x30; // '0' regular file
+    header.write("ustar\0", 257, 6, "utf8");
+    header.write("00", 263, 2, "utf8");
+    let sum = 0;
+    for (const b of header) sum += b;
+    header.write(sum.toString(8).padStart(6, "0") + "\0 ", 148, 8, "utf8");
+    blocks.push(header, e.data);
+    const pad = 512 - (e.data.length % 512 || 512);
+    if (pad > 0 && pad < 512) blocks.push(Buffer.alloc(pad));
+  }
+  blocks.push(Buffer.alloc(1024)); // end-of-archive
+  return Buffer.concat(blocks);
+}

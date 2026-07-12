@@ -10,7 +10,8 @@ import { join } from "node:path";
 
 import type { SnapshotDoc, PackageRow, SourceRecord, TidepoolConfig } from "../../shared/types.js";
 import { exportSnapshot, SnapshotStore } from "../src/core/snapshot.js";
-import { digestOf, InflowStore } from "../src/core/inflow.js";
+import { digestOf } from "../src/core/inflow.js";
+import { ObservationStore } from "../src/core/store.js";
 import { Aggregator, mapLimit, type UnitProvider, type IndexResult, type AdvisoryJoin } from "../src/core/aggregator.js";
 import { DiskCache, tarEntries } from "../src/lib/util.js";
 import { classifyPath, analyzeAgainstSnapshot } from "../src/dispatch/analyze.js";
@@ -131,11 +132,11 @@ test("Aggregator: sync → summaries → inflow observations; re-sync detects mo
   const dir = mkdtempSync(join(tmpdir(), "tp-agg-"));
   try {
     const disk = new DiskCache(join(dir, "cache"));
-    const inflow = new InflowStore(join(dir, "history"));
+    const store = new ObservationStore(join(dir, "data"));
     const config = { server: {}, distros: [] } as unknown as TidepoolConfig;
 
     const p1 = stubProvider({ alpha: "1.0.0", beta: "2.0.0" });
-    const agg = new Aggregator([p1], disk, config, inflow);
+    const agg = new Aggregator([p1], disk, config, store);
     const st = await agg.sync(p1, { force: true });
     assert.equal(st.status, "ready");
 
@@ -147,14 +148,14 @@ test("Aggregator: sync → summaries → inflow observations; re-sync detects mo
     assert.equal(agg.packages(p1, st, { per: 10, page: 1, advisoriesOnly: true }).total, 1);
     assert.equal(agg.packages(p1, st, { per: 10, page: 1, q: "bet" }).items[0]?.name, "beta");
 
-    assert.equal(inflow.observations("code", "stub").length, 2, "one observation per source (index + advisories)");
-    assert.equal(inflow.changes("code", "stub").length, 0, "first sight fabricates nothing");
+    assert.equal(store.observationsFor("code", "stub").length, 2, "one observation per source (index + advisories)");
+    assert.equal(store.changesFor("code", "stub").length, 0, "first sight fabricates nothing");
 
     // upstream moves; a second real sync must yield exactly one attributed change
     const p2 = stubProvider({ alpha: "1.0.1", beta: "2.0.0" });
-    const agg2 = new Aggregator([p2], disk, config, inflow);
+    const agg2 = new Aggregator([p2], disk, config, store);
     await agg2.sync(p2, { force: true });
-    const changes = inflow.changes("code", "stub");
+    const changes = store.changesFor("code", "stub");
     assert.equal(changes.length, 1);
     assert.equal(changes[0].kind, "version-moved");
     assert.equal(changes[0].package, "alpha");
@@ -162,7 +163,7 @@ test("Aggregator: sync → summaries → inflow observations; re-sync detects mo
 
     // peek serves from cache without any provider call
     const p3 = stubProvider({}, { syncIndex: () => Promise.reject(new Error("peek must not fetch")) });
-    const peeked = new Aggregator([p3], disk, config, inflow).peek(p3);
+    const peeked = new Aggregator([p3], disk, config, store).peek(p3);
     assert.equal(peeked?.packages.length, 2, "peek reads the store, never the network");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -179,11 +180,11 @@ test("Aggregator: a unit whose only source fails is an error state, recorded as 
           packages: [],
         }),
     });
-    const inflow = new InflowStore(join(dir, "history"));
-    const agg = new Aggregator([failing], new DiskCache(join(dir, "cache")), { server: {}, distros: [] } as unknown as TidepoolConfig, inflow);
+    const store = new ObservationStore(join(dir, "data"));
+    const agg = new Aggregator([failing], new DiskCache(join(dir, "cache")), { server: {}, distros: [] } as unknown as TidepoolConfig, store);
     const st = await agg.sync(failing, { force: true });
     assert.equal(st.status, "error");
-    const obs = inflow.observations("code", "stub").find((o) => o.sourceId === "surface:api");
+    const obs = store.observationsFor("code", "stub").find((o) => o.sourceId === "surface:api");
     assert.equal(obs?.status, "error");
     assert.equal(obs?.error, "HTTP 503", "failures are observations too");
   } finally {
