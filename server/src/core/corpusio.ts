@@ -17,7 +17,7 @@ import { zstdCompressSync, zstdDecompressSync, gunzipSync } from "node:zlib";
 
 import { iso, sqliteModule, type SqliteDatabase } from "./db.js";
 import { digestOf, stableStringify } from "./inflow.js";
-import type { ObservationStore } from "./store.js";
+import type { SqliteObservationStore } from "./store.js";
 import { parseJsonCorpus, readCorpus, writeCorpusAtomic } from "../lib/corpus.js";
 import { sha256hex, tarEntries, tarWrite } from "../lib/util.js";
 import { validateExportManifest } from "../lib/validate.js";
@@ -29,7 +29,7 @@ export interface ExportManifest {
   schemaVersion: string;
   migrations: [number, string][];
   exportedAt: string;
-  mode: "full" | "thin";
+  mode: ExportMode;
   observationRange: { from: string | null; to: string | null };
   sources: { id: string; domain: string; unitId: string; sourceType: string }[];
   databaseDigest: string;
@@ -78,12 +78,15 @@ const PK: Record<string, string[]> = {
 
 // ------------------------------------------------------------------- export
 
+export type ExportMode = "full" | "thin" | "database-only" | "referenced-objects";
+
 export async function exportCorpus(
-  store: ObservationStore,
+  store: SqliteObservationStore,
   outPath: string,
-  opts: { snapshotIds?: string[] } = {}
+  opts: { snapshotIds?: string[]; mode?: ExportMode } = {}
 ): Promise<ExportResult> {
-  const thin = (opts.snapshotIds?.length ?? 0) > 0;
+  const mode: ExportMode = opts.mode ?? ((opts.snapshotIds?.length ?? 0) > 0 ? "thin" : "full");
+  const thin = mode === "thin";
   const work = mkdtempSync(join(tmpdir(), "tidepool-export-"));
   try {
     // consistent database copy via the backup mechanism — never a WAL file copy
@@ -92,14 +95,24 @@ export async function exportCorpus(
     const dbBytes = readCorpus(dbCopy);
 
     const allObjects = store.objectDigests();
-    const wanted = thin ? store.normalizedDigestsForSnapshots(opts.snapshotIds ?? []) : new Set(allObjects);
+    const wanted =
+      mode === "database-only"
+        ? new Set<string>()
+        : thin
+          ? store.normalizedDigestsForSnapshots(opts.snapshotIds ?? [])
+          : mode === "referenced-objects"
+            ? store.referencedObjectDigests()
+            : new Set(allObjects);
     const objectDigests = allObjects.filter((d) => wanted.has(d));
     const missingObjects = [...wanted].filter((d) => !allObjects.includes(d)).sort();
 
     const snapDir = join(store.dataDir, "snapshots");
-    const snapFiles = existsSync(snapDir)
-      ? readdirSync(snapDir).filter((f) => /^[0-9a-f]{64}\.json$/.test(f) && (!thin || (opts.snapshotIds ?? []).includes(f.replace(/\.json$/, ""))))
-      : [];
+    const snapFiles =
+      mode === "database-only"
+        ? []
+        : existsSync(snapDir)
+          ? readdirSync(snapDir).filter((f) => /^[0-9a-f]{64}\.json$/.test(f) && (!thin || (opts.snapshotIds ?? []).includes(f.replace(/\.json$/, ""))))
+          : [];
 
     const range = store.observationRange();
     const manifest: ExportManifest = {
@@ -107,7 +120,7 @@ export async function exportCorpus(
       schemaVersion: String(store.opened.migrations.length ? store.opened.migrations[store.opened.migrations.length - 1][0] : 0),
       migrations: store.opened.migrations,
       exportedAt: iso(Date.now()),
-      mode: thin ? "thin" : "full",
+      mode,
       observationRange: range,
       sources: store.sources(),
       databaseDigest: sha256hex(dbBytes),
@@ -116,6 +129,8 @@ export async function exportCorpus(
       snapshotIds: snapFiles.map((f) => f.replace(/\.json$/, "")),
       limitations: [
         ...(thin ? ["thin export: objects are limited to those referenced by the selected snapshots"] : []),
+        ...(mode === "database-only" ? ["database-only export: no objects or snapshot documents included"] : []),
+        ...(mode === "referenced-objects" ? ["referenced-objects export: unreferenced (orphaned) objects excluded"] : []),
         ...(missingObjects.length ? [`${missingObjects.length} referenced object(s) were not present locally`] : []),
       ],
     };
@@ -154,7 +169,7 @@ export interface ImportReport {
   snapshotFilesWritten: number;
 }
 
-export function importCorpus(store: ObservationStore, bundlePath: string, opts: { dryRun?: boolean } = {}): ImportReport {
+export function importCorpus(store: SqliteObservationStore, bundlePath: string, opts: { dryRun?: boolean } = {}): ImportReport {
   const dryRun = opts.dryRun ?? false;
   const raw = readCorpus(bundlePath);
   let tarBytes: Buffer;

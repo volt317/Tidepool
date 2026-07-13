@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { DomainId, Verification } from "../../shared/types.js";
-import { ObservationStore, type CollectionInput } from "../src/core/store.js";
+import { SqliteObservationStore, type CollectionInput } from "../src/core/store.js";
 import { exportCorpus, importCorpus } from "../src/core/corpusio.js";
 import { buildSnapshot, SnapshotStore } from "../src/core/snapshot.js";
 import { openDatabase, DEFAULT_MIGRATIONS_DIR } from "../src/core/db.js";
@@ -34,6 +34,7 @@ function collection(over: Partial<CollectionInput> = {}): CollectionInput {
     signedBy: [],
     limitations: [],
     rawArtifactDigest: null,
+    coverageMode: "explicit-scope",
     parserVersion: "1",
     configVersion: "c".repeat(64),
     recordKind: "index",
@@ -64,7 +65,7 @@ const fakeProvider = (): UnitProvider => ({
 test("unchanged content: new observation, deduplicated states and objects, zero changes", () => {
   const dir = tmp();
   try {
-    const store = new ObservationStore(dir);
+    const store = new SqliteObservationStore(dir);
     const r1 = store.recordCollection(collection({ collectedAt: T0 }));
     const r2 = store.recordCollection(collection({ collectedAt: T0 + 60_000 }));
 
@@ -93,7 +94,7 @@ test("unchanged content: new observation, deduplicated states and objects, zero 
 test("failure and recovery are first-class observations with derived transitions", () => {
   const dir = tmp();
   try {
-    const store = new ObservationStore(dir);
+    const store = new SqliteObservationStore(dir);
     store.recordCollection(collection({ collectedAt: T0 }));
     store.recordCollection(collection({ collectedAt: T0 + 1000, status: "error", error: "HTTP 503", records: [] }));
     store.recordCollection(collection({ collectedAt: T0 + 2000 }));
@@ -123,7 +124,7 @@ test("failure and recovery are first-class observations with derived transitions
 test("historical reconstruction: an old snapshot rebuilds identically after newer syncs", async () => {
   const dir = tmp();
   try {
-    const store = new ObservationStore(dir);
+    const store = new SqliteObservationStore(dir);
     const providers = [fakeProvider()];
 
     store.recordCollection(collection({ collectedAt: T0 }));
@@ -163,7 +164,7 @@ test("full corpus export loads into a fresh store offline, provenance intact", a
   const a = tmp();
   const b = tmp();
   try {
-    const src = new ObservationStore(a);
+    const src = new SqliteObservationStore(a);
     src.recordCollection(collection({ collectedAt: T0 }));
     src.recordCollection(
       collection({
@@ -193,7 +194,7 @@ test("full corpus export loads into a fresh store offline, provenance intact", a
     assert.equal(exported.manifest.mode, "full");
     assert.ok(exported.manifest.objectDigests.length >= 2, "both normalized corpora travel");
 
-    const dst = new ObservationStore(b);
+    const dst = new SqliteObservationStore(b);
     const dry = importCorpus(dst, bundle, { dryRun: true });
     assert.equal(dry.dryRun, true);
     assert.ok(dry.inserted.observations >= 2, "dry run reports what WOULD be inserted");
@@ -209,7 +210,7 @@ test("full corpus export loads into a fresh store offline, provenance intact", a
 
     // the imported store answers historical queries with no network and no recollection
     const sourceId = dst.sources()[0].id;
-    const at = dst.queryStateAt(sourceId, T0 + 500);
+    const at = dst.sourceStateAt(sourceId, T0 + 500);
     assert.equal((at.records as { name: string; version: string }[]).find((r) => r.name === "alpha")?.version, "1.0.0");
     const moved = dst.changesFor("code", "stub").find((c) => c.kind === "version-moved");
     assert.equal(moved?.package, "alpha");
@@ -238,7 +239,7 @@ test("full corpus export loads into a fresh store offline, provenance intact", a
 test("thin export carries only snapshot-referenced objects", async () => {
   const a = tmp();
   try {
-    const src = new ObservationStore(a);
+    const src = new SqliteObservationStore(a);
     src.recordCollection(collection({ collectedAt: T0 }));
     const snap = await buildSnapshot({ providers: [fakeProvider()], store: src, stage: "observation", windowHours: 1, window: { from: T0 - 1, to: T0 + 1 } });
     // the production path: SnapshotStore writes the document AND the manifest rows
@@ -266,7 +267,7 @@ test("migration ledger: applied versions recorded with digests; drift refuses to
   try {
     cpSync(DEFAULT_MIGRATIONS_DIR, migs, { recursive: true });
     const first = openDatabase(dir, migs);
-    assert.equal(first.migrations.length, 3, "all three migrations applied");
+    assert.equal(first.migrations.length, 4, "all four migrations applied");
     first.db.close();
 
     // reopen: idempotent, nothing re-applied, digests verified
@@ -286,7 +287,7 @@ test("migration ledger: applied versions recorded with digests; drift refuses to
 test("source identity is stable across configuration changes; config provenance is per-observation", () => {
   const dir = tmp();
   try {
-    const store = new ObservationStore(dir);
+    const store = new SqliteObservationStore(dir);
     store.recordCollection(collection({ collectedAt: T0, configVersion: "a".repeat(64) }));
     store.recordCollection(collection({ collectedAt: T0 + 1000, configVersion: "b".repeat(64) }));
     assert.equal(store.sources().length, 1, "one source identity across config revisions");

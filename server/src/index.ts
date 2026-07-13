@@ -14,7 +14,7 @@ import { validateConfig } from "./lib/validate.js";
 
 import type { TidepoolConfig } from "../../shared/types.js";
 import { Aggregator } from "./core/aggregator.js";
-import { ObservationStore } from "./core/store.js";
+import { SqliteObservationStore } from "./core/store.js";
 import { SnapshotStore } from "./core/snapshot.js";
 import { buildRouter } from "./core/routes.js";
 import { buildProviders } from "./domains/providers.js";
@@ -39,13 +39,13 @@ function loadConfig(): { config?: TidepoolConfig; errors: string[] } {
   return validateConfig(parsed);
 }
 
-function build(config: TidepoolConfig): { config: TidepoolConfig; router: express.Router; store: ObservationStore } {
+function build(config: TidepoolConfig): { config: TidepoolConfig; router: express.Router; store: SqliteObservationStore } {
   // .cache stays a disposable TTL response cache; .tidepool is the durable
   // evidence store — two directories, two very different contracts
   const cacheDir = join(ROOT, config.server.cacheDir ?? ".cache");
   const dataDir = join(ROOT, config.server.dataDir ?? ".tidepool");
   const disk = new DiskCache(cacheDir);
-  const store = new ObservationStore(dataDir);
+  const store = new SqliteObservationStore(dataDir);
   const snapshots = new SnapshotStore(join(dataDir, "snapshots"), store);
   const agg = new Aggregator(buildProviders(config), disk, config, store);
   return { config, router: buildRouter(agg, snapshots), store };

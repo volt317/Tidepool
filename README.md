@@ -1,5 +1,28 @@
 # Tidepool
 
+Tidepool observes configured upstream surfaces, preserves what it saw as
+durable evidence, and lets projects be judged against that evidence — even
+offline:
+
+```sh
+# 1. observe: sync a unit; every source becomes immutable observations
+curl -X POST localhost:8747/api/domains/code/units/npm/sync
+
+# 2. bound: build a snapshot — historical reconstruction at a time boundary
+curl -X POST localhost:8747/api/snapshots \
+  -H 'content-type: application/json' -d '{"stage":"interpretive"}'
+
+# 3. dispatch: evaluate a local project against that snapshot, offline
+node server/dist/server/src/cli/dispatch.js --snapshot <digest> ./my-service
+```
+
+    observed inflow → bounded snapshot → offline project dispatch finding
+
+(`examples/` holds a small deterministic snapshot + dispatch artifact
+produced by this exact pipeline; `docs/adr/` records the architecture
+decisions.)
+
+
 **A self-hosted upstream survey service.** Tidepool runs one contained
 aggregation flow over two parallel domains: **Linux distributions** (the
 complete package list from each distro's own index sources, advisory feed
@@ -467,7 +490,15 @@ verdict interpretation (`interpretGpgvVerdict` is testable without gpg).
 | Backup-API export, full + thin evidence bundles, safe import | implemented (11–12) with dry-run, checksum, schema-ledger, and conflict-retention guarantees |
 | Milestone test classes 13–16 | implemented (dedup, failure/recovery, old-snapshot immutability, offline load) |
 | Evidence / relationships / finding-join tables | schema present (0002); only findings are written today (at snapshot persist) — evidence extraction is the seam |
-| Two-stage collection/analysis transactions, retention policies, compaction | deferred by design |
+| Two-phase collection/analysis transactions (analysis_status, retryable) | implemented — a diffing failure never erases evidence |
+| Dual source heads (latest vs latest-successful) | implemented; staleness declared in reconstruction |
+| Native version semantics per ecosystem (`ordering: unsupported` honesty) | implemented — dpkg/apk/pacman/semver/pep440/dotted native; gems/maven/conan/vcpkg honestly unsupported |
+| Structured field-level metadata diffs; advisory trichotomy (withdrawn / left-coverage-window / no-longer-observed) | implemented, coverage-mode driven |
+| Corpus status/verify/vacuum; export modes (full/thin/database-only/referenced-objects) | implemented |
+| apt raw-artifact preservation (InRelease + Packages.gz into the corpus) | implemented; other collectors' raw capture + HTTP fetch-metadata threading deferred |
+| NdjsonObservationStore parity impl | deliberately not resurrected — retired one milestone before the seam existed; the interface + SQLite impl serve the seam's purpose |
+| UI: observation timeline / entity history / truth-boundary / UnitAvailability axes | deferred (Milestone 6) |
+| Retention policies, compaction | deferred by design |
 | "Do not restrict collection to relevance" | collection is scope-bounded by config (whole archives for distros; declared sets for registries); registry-wide enumeration remains the documented scope.mode seam |
 
 ## Known limitations

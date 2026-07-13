@@ -29,6 +29,7 @@ interface Stanza extends Omit<PackageRow, "versions"> {
 interface PocketResult {
   source: SourceRecord;
   stanzas: Stanza[];
+  raw: RawArtifact[];
 }
 
 async function syncPocket(
@@ -39,6 +40,7 @@ async function syncPocket(
   verifySignatures: boolean,
   keyrings: string[]
 ): Promise<PocketResult> {
+  const raw: RawArtifact[] = [];
   const source: SourceRecord = {
     id: `pocket:${pocket.id}`,
     kind: "apt-pocket",
@@ -55,6 +57,7 @@ async function syncPocket(
     const inReleaseUrl = `${pocket.base}/dists/${pocket.suite}/InRelease`;
     source.urls.push(inReleaseUrl);
     const inRelease = await fetchBytes(inReleaseUrl);
+    raw.push({ bytes: inRelease, role: "release-metadata", url: inReleaseUrl, mediaType: "text/plain" });
     const componentDigests: string[] = [];
 
     let verification: Verification = null;
@@ -74,6 +77,7 @@ async function syncPocket(
       const pkgUrl = `${pocket.base}/dists/${pocket.suite}/${rel}`;
       source.urls.push(pkgUrl);
       const gz = await fetchBytes(pkgUrl);
+      raw.push({ bytes: gz, role: "package-index", url: pkgUrl, mediaType: "application/gzip" });
 
       if (verifyDigests || verifySignatures) {
         const expected = table[rel];
@@ -114,10 +118,10 @@ async function syncPocket(
     source.status = "error";
     source.error = String(e instanceof Error ? e.message : e);
   }
-  return { source, stanzas };
+  return { source, stanzas, raw };
 }
 
-import type { IndexResult } from "../../core/aggregator.js";
+import type { IndexResult, RawArtifact } from "../../core/aggregator.js";
 
 /**
  * Sync all pockets of an apt distro and merge into the comprehensive list.
@@ -157,5 +161,11 @@ export async function syncAptIndex(distroCfg: DistroConfig): Promise<IndexResult
   }
 
   const packages = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-  return { sources: results.map((r) => r.source), packages };
+  return {
+    sources: results.map((r) => r.source),
+    packages,
+    // the verified chain travels into the corpus: InRelease (signature target)
+    // and each Packages.gz (digest target), re-verifiable offline
+    rawArtifacts: Object.fromEntries(results.filter((r) => r.raw.length).map((r) => [r.source.id, r.raw])),
+  };
 }

@@ -64,12 +64,26 @@ function change(
  * `nextRecords` are the blobs the observations point at; passing them in
  * keeps this a pure function.
  */
+export type CoverageMode = "complete" | "bounded-pages" | "explicit-scope" | "dependency-closure" | "namespace" | "registry-wide";
+
+/** Coverage-aware disappearance semantics: only a complete authoritative
+ *  source can prove withdrawal; a bounded feed only proves aging-out; and
+ *  anything else is merely "no longer observed". */
+export function advisoryDisappearanceKind(mode: CoverageMode | undefined): ChangeKind {
+  if (mode === "complete") return "advisory-withdrawn";
+  if (mode === "bounded-pages") return "advisory-left-coverage-window";
+  return "advisory-no-longer-observed";
+}
+
+const META_FIELDS = ["component", "section"] as const;
+
 export function detectChanges(
   prev: Observation | null,
   next: Observation,
   prevRecords: unknown,
   nextRecords: unknown,
-  sourceKind: "index" | "advisory"
+  sourceKind: "index" | "advisory",
+  coverageMode?: CoverageMode
 ): ChangeRecord[] {
   const base = {
     domain: next.domain,
@@ -117,8 +131,19 @@ export function detectChanges(
       } else {
         if (old.version !== rec.version)
           out.push(change(base, "version-moved", { package: name, from: old.version, to: rec.version }));
-        if ((old.meta ?? "") !== (rec.meta ?? ""))
-          out.push(change(base, "metadata-changed", { package: name, from: old.meta ?? "", to: rec.meta ?? "" }));
+        if ((old.meta ?? "") !== (rec.meta ?? "")) {
+          // structured field-level differences, not two serialized strings:
+          // meta is "component|section" — diff the named parts
+          const [oc = null, os = null] = (old.meta ?? "").split("|");
+          const [nc = null, ns = null] = (rec.meta ?? "").split("|");
+          const fields: Record<string, { from: string | null; to: string | null }> = {};
+          const parts: [string, string | null, string | null][] = [
+            [META_FIELDS[0], oc || null, nc || null],
+            [META_FIELDS[1], os || null, ns || null],
+          ];
+          for (const [f, a, b] of parts) if (a !== b) fields[f] = { from: a, to: b };
+          out.push(change(base, "metadata-changed", { package: name, from: old.meta ?? "", to: rec.meta ?? "", fields }));
+        }
       }
     }
     for (const [name, rec] of a) {
@@ -135,9 +160,7 @@ export function detectChanges(
     }
     for (const [, rec] of a) {
       if (!b.has(`${rec.package}\u0000${rec.id}`))
-        // bounded feeds cannot prove withdrawal — only that the advisory is no
-        // longer inside the configured observation window
-        out.push(change(base, "advisory-no-longer-observed", { package: rec.package, from: rec.id }));
+        out.push(change(base, advisoryDisappearanceKind(coverageMode), { package: rec.package, from: rec.id }));
     }
   }
   return out;
@@ -145,7 +168,7 @@ export function detectChanges(
 
 // ------------------------------------------------------------- heuristics
 
-export const HEURISTICS_VERSION = "1";
+
 
 interface RuleInput {
   window: { from: number; to: number };
@@ -153,12 +176,17 @@ interface RuleInput {
   changes: ChangeRecord[];
 }
 
-type Rule = (input: RuleInput) => HeuristicFinding[];
+export interface HeuristicRule {
+  id: string;
+  version: string;
+  evaluate(input: RuleInput): HeuristicFinding[];
+}
+type RuleFn = (input: RuleInput) => HeuristicFinding[];
 
 const finding = (f: Omit<HeuristicFinding, "confidence"> & { confidence: number }): HeuristicFinding => f;
 
 /** inflow.release-burst — unusually many version movements in one unit. */
-const releaseBurst: Rule = ({ changes }) => {
+const releaseBurst: RuleFn = ({ changes }) => {
   const byUnit = new Map<string, ChangeRecord[]>();
   for (const c of changes) {
     if (c.kind === "version-moved" || c.kind === "package-added") {
@@ -187,7 +215,7 @@ const releaseBurst: Rule = ({ changes }) => {
 };
 
 /** inflow.security-burst — a wave of advisory publications. */
-const securityBurst: Rule = ({ changes }) => {
+const securityBurst: RuleFn = ({ changes }) => {
   const pubs = changes.filter((c) => c.kind === "advisory-published");
   if (pubs.length < 5) return [];
   const units = [...new Set(pubs.map((c) => `${c.domain}/${c.unit}`))];
@@ -209,7 +237,7 @@ const securityBurst: Rule = ({ changes }) => {
 };
 
 /** inflow.corrective-release — the same package moved twice quickly. */
-const correctiveRelease: Rule = ({ changes }) => {
+const correctiveRelease: RuleFn = ({ changes }) => {
   const moves = changes.filter((c) => c.kind === "version-moved" && c.package);
   const byPkg = new Map<string, ChangeRecord[]>();
   for (const c of moves) {
@@ -243,7 +271,7 @@ const correctiveRelease: Rule = ({ changes }) => {
 };
 
 /** inflow.source-degradation — a source failed and has not recovered. */
-const sourceDegradation: Rule = ({ changes }) => {
+const sourceDegradation: RuleFn = ({ changes }) => {
   const bySource = new Map<string, ChangeRecord[]>();
   for (const c of changes) {
     if (c.kind === "source-failure" || c.kind === "source-recovery") {
@@ -273,7 +301,7 @@ const sourceDegradation: Rule = ({ changes }) => {
 };
 
 /** inflow.signer-transition — the signing identity of a source changed. */
-const signerTransition: Rule = ({ changes }) => {
+const signerTransition: RuleFn = ({ changes }) => {
   return changes
     .filter((c) => c.kind === "signer-transition" || c.kind === "verification-transition")
     .map((c) =>
@@ -291,8 +319,16 @@ const signerTransition: Rule = ({ changes }) => {
     );
 };
 
-export const RULES: Rule[] = [releaseBurst, securityBurst, correctiveRelease, sourceDegradation, signerTransition];
+export const RULES: HeuristicRule[] = [
+  { id: "inflow.release-burst", version: "1", evaluate: releaseBurst },
+  { id: "inflow.security-burst", version: "1", evaluate: securityBurst },
+  { id: "inflow.corrective-release", version: "1", evaluate: correctiveRelease },
+  { id: "inflow.source-degradation", version: "1", evaluate: sourceDegradation },
+  { id: "inflow.signer-transition", version: "1", evaluate: signerTransition },
+];
 
-export function runHeuristics(input: RuleInput): HeuristicFinding[] {
-  return RULES.flatMap((r) => r(input));
+/** Run every rule; report exactly which rule versions produced the findings. */
+export function runHeuristics(input: RuleInput): { findings: HeuristicFinding[]; ruleVersions: Record<string, string> } {
+  const ruleVersions = Object.fromEntries(RULES.map((r) => [r.id, r.version]));
+  return { findings: RULES.flatMap((r) => r.evaluate(input)), ruleVersions };
 }

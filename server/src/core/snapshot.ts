@@ -27,9 +27,9 @@ import type {
   SnapshotSourceCoverage,
   SnapshotStage,
 } from "../../../shared/types.js";
-import { digestOf, runHeuristics, stableStringify, type AdvisoryRecordLite, type IndexRecordLite } from "./inflow.js";
-import { debCompare, tarWrite } from "../lib/util.js";
-import type { ObservationStore } from "./store.js";
+import { digestOf, runHeuristics, stableStringify } from "./inflow.js";
+import { tarWrite } from "../lib/util.js";
+import type { ObservationStore, SqliteObservationStore } from "./store.js";
 import type { UnitProvider } from "./aggregator.js";
 
 export const GENERATOR_VERSION = "1";
@@ -62,8 +62,8 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
   const ambiguities: string[] = [];
 
   for (const p of inp.providers) {
-    const recon = inp.store.buildSnapshotInputs(p.domain, p.id, window);
-    if (recon.length === 0) {
+    const unit = inp.store.unitStateAt(p.domain, p.id, window.to);
+    if (unit.sources.length === 0) {
       notObserved.push(`${p.domain}/${p.id}: no observations exist — unit never synced`);
       continue;
     }
@@ -71,11 +71,7 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
     if (inp.stage !== "observation") {
       changes.push(...inp.store.changesFor(p.domain, p.id, window));
     }
-
-    // reconstruct the unit's merged state as it was known at window.to
-    const versionsByName = new Map<string, Record<string, string>>();
-    const advisoriesByName = new Map<string, number>();
-    for (const src of recon) {
+    for (const src of unit.sources) {
       coverage.push({ ...src.coverage, authority: src.coverage.authority || p.label });
       if (src.observation?.status === "error") {
         notObserved.push(`${p.domain}/${p.id}/${src.sourceType}: latest collection at the boundary failed (${src.observation.error ?? "unknown"})`);
@@ -84,35 +80,8 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
         notObserved.push(`${p.domain}/${p.id}/${src.sourceType}: never observed at or before the window boundary`);
       }
       for (const lim of src.coverage.limitations) notObserved.push(`${p.domain}/${p.id}/${src.sourceType}: ${lim}`);
-
-      const suffix = src.sourceType.includes(":") ? src.sourceType.slice(src.sourceType.indexOf(":") + 1) : src.sourceType;
-      if (src.recordKind === "index") {
-        for (const r of src.records as IndexRecordLite[]) {
-          const v = versionsByName.get(r.name) ?? {};
-          v[suffix] = r.version;
-          versionsByName.set(r.name, v);
-        }
-      } else {
-        for (const r of src.records as AdvisoryRecordLite[]) {
-          advisoriesByName.set(r.package, (advisoriesByName.get(r.package) ?? 0) + 1);
-        }
-      }
     }
-    for (const [name, versions] of [...versionsByName].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const vals = Object.values(versions);
-      const current = vals.reduce((best, v) => (best === null || debCompare(v, best) > 0 ? v : best), null as string | null);
-      const drift = new Set(vals).size > 1;
-      entities.push({
-        domain: p.domain,
-        unit: p.id,
-        name,
-        source: name,
-        versions,
-        current,
-        drift,
-        advisoryCount: advisoriesByName.get(name) ?? 0,
-      });
-    }
+    entities.push(...unit.entities);
   }
 
   // relationships (churn+): advisory activity and a version movement on the
@@ -143,7 +112,8 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
     }
   }
 
-  const findings = inp.stage === "interpretive" ? runHeuristics({ window, observations, changes }) : [];
+  const heur = inp.stage === "interpretive" ? runHeuristics({ window, observations, changes }) : { findings: [], ruleVersions: {} };
+  const findings = heur.findings;
   for (const f of findings) ambiguities.push(...f.ambiguities.map((a) => `${f.ruleId}: ${a}`));
 
   const doc: SnapshotDoc = {
@@ -164,6 +134,7 @@ export async function buildSnapshot(inp: SnapshotInputs): Promise<SnapshotDoc> {
     changes,
     relationships,
     findings,
+    ruleVersions: heur.ruleVersions,
     ambiguities: [...new Set(ambiguities)],
   };
   // the digest binds content, not wall-clock: same window + same store ⇒ same digest
@@ -179,7 +150,7 @@ const DIGEST_RE = /^([0-9a-f]{64})$/;
 export class SnapshotStore {
   constructor(
     private root: string,
-    private manifests?: ObservationStore
+    private manifests?: SqliteObservationStore
   ) {
     mkdirSync(root, { recursive: true });
   }

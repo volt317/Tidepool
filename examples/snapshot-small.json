@@ -1,0 +1,178 @@
+{
+  "schema": "tidepool-snapshot-v1",
+  "stage": "interpretive",
+  "generatorVersion": "1",
+  "createdAt": 1700007200000,
+  "scope": {
+    "domains": [
+      "code"
+    ],
+    "units": [
+      "code/npm"
+    ]
+  },
+  "window": {
+    "from": 1699999999999,
+    "to": 1700007200000
+  },
+  "authorities": [
+    "npm (example)"
+  ],
+  "coverage": [
+    {
+      "domain": "code",
+      "unit": "npm",
+      "authority": "npm (example)",
+      "sourceId": "advisories:osv",
+      "status": "ok",
+      "verification": null,
+      "signedBy": [],
+      "recordCount": 1,
+      "collectedAt": 1700003600000,
+      "error": null,
+      "limitations": []
+    },
+    {
+      "domain": "code",
+      "unit": "npm",
+      "authority": "npm (example)",
+      "sourceId": "surface:api",
+      "status": "ok",
+      "verification": null,
+      "signedBy": [],
+      "recordCount": 2,
+      "collectedAt": 1700003600000,
+      "error": null,
+      "limitations": []
+    }
+  ],
+  "notObserved": [],
+  "entities": [
+    {
+      "domain": "code",
+      "unit": "npm",
+      "name": "express",
+      "source": "express",
+      "versions": {
+        "api": "5.2.1"
+      },
+      "current": "5.2.1",
+      "ordering": "native",
+      "drift": false,
+      "advisoryCount": 1
+    },
+    {
+      "domain": "code",
+      "unit": "npm",
+      "name": "lodash",
+      "source": "lodash",
+      "versions": {
+        "api": "4.17.21"
+      },
+      "current": "4.17.21",
+      "ordering": "native",
+      "drift": false,
+      "advisoryCount": 0
+    }
+  ],
+  "observations": [
+    {
+      "id": "fb5b6425efe08eacfa202d284408dd5beb16d28777e111ebad44d77001b3de41",
+      "domain": "code",
+      "unit": "npm",
+      "authority": "npm (example)",
+      "sourceId": "surface:api",
+      "collectedAt": 1700000000000,
+      "scope": "2 packages by explicit list",
+      "verification": null,
+      "signedBy": [],
+      "status": "ok",
+      "error": null,
+      "coverage": {
+        "observed": 2,
+        "limitations": []
+      },
+      "artifactDigest": null,
+      "parserVersion": "1",
+      "configVersion": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "recordsDigest": "41c88680e6c4e287f96b4f27aa4804b7474979d840bfcac5a8c368d99424a66c",
+      "recordCount": 2
+    },
+    {
+      "id": "986f20ad216262c8b84adfefb85793e405d03bee7999136140a6ccd21312e4fe",
+      "domain": "code",
+      "unit": "npm",
+      "authority": "npm (example)",
+      "sourceId": "advisories:osv",
+      "collectedAt": 1700003600000,
+      "scope": "2 packages by explicit list",
+      "verification": null,
+      "signedBy": [],
+      "status": "ok",
+      "error": null,
+      "coverage": {
+        "observed": 1,
+        "limitations": []
+      },
+      "artifactDigest": null,
+      "parserVersion": "1",
+      "configVersion": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "recordsDigest": "3dfe67dea44a1dcec52eb68dc5b319dedad11afae8aeaff11a9bd00f5c191573",
+      "recordCount": 1
+    },
+    {
+      "id": "113e3a94663e747e61477c8517c0c3c7a1b9f26dddf9236881fc63d6351d11df",
+      "domain": "code",
+      "unit": "npm",
+      "authority": "npm (example)",
+      "sourceId": "surface:api",
+      "collectedAt": 1700003600000,
+      "scope": "2 packages by explicit list",
+      "verification": null,
+      "signedBy": [],
+      "status": "ok",
+      "error": null,
+      "coverage": {
+        "observed": 2,
+        "limitations": []
+      },
+      "artifactDigest": null,
+      "parserVersion": "1",
+      "configVersion": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "recordsDigest": "0acbe8c0d4d52583afe77e07afe1823121e0af6018ebec8651537f3f2dec2961",
+      "recordCount": 2
+    }
+  ],
+  "changes": [
+    {
+      "id": "12c3dcad2668e07b6c642d83ff16d82560da619e6b2ee9a215ba57cfabbdaf2a",
+      "domain": "code",
+      "unit": "npm",
+      "sourceId": "surface:api",
+      "kind": "version-moved",
+      "package": "express",
+      "from": "5.2.0",
+      "to": "5.2.1",
+      "fields": {
+        "version": {
+          "from": "5.2.0",
+          "to": "5.2.1"
+        }
+      },
+      "fromObservation": "fb5b6425efe08eacfa202d284408dd5beb16d28777e111ebad44d77001b3de41",
+      "toObservation": "113e3a94663e747e61477c8517c0c3c7a1b9f26dddf9236881fc63d6351d11df",
+      "detectedAt": 1700003600000
+    }
+  ],
+  "relationships": [],
+  "findings": [],
+  "ruleVersions": {
+    "inflow.release-burst": "1",
+    "inflow.security-burst": "1",
+    "inflow.corrective-release": "1",
+    "inflow.source-degradation": "1",
+    "inflow.signer-transition": "1"
+  },
+  "ambiguities": [],
+  "digest": "804fa895be856a4b34828069613dfda2c6d77ae9328379062ae925d658fa7dbb"
+}

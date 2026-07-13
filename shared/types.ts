@@ -313,6 +313,8 @@ export type ChangeKind =
   | "metadata-changed"
   | "advisory-published"
   | "advisory-modified"
+  | "advisory-withdrawn"
+  | "advisory-left-coverage-window"
   | "advisory-no-longer-observed"
   | "source-failure"
   | "source-recovery"
@@ -330,6 +332,8 @@ export interface ChangeRecord {
   from?: string | null;
   to?: string | null;
   detail?: string;
+  /** structured field-level differences (e.g. component/section for metadata) */
+  fields?: Record<string, { from: string | null; to: string | null }>;
   fromObservation: string | null;
   toObservation: string;
   detectedAt: number;
@@ -364,6 +368,8 @@ export interface SnapshotEntity {
   source: string;
   versions: Record<string, string>;
   current: string | null;
+  /** whether `current` is a native ordering claim or unsupported for this ecosystem */
+  ordering: "native" | "unsupported";
   drift: boolean;
   advisoryCount: number;
 }
@@ -401,6 +407,8 @@ export interface SnapshotDoc {
   changes: ChangeRecord[];
   relationships: { kind: string; a: string; b: string; rationale: string }[];
   findings: HeuristicFinding[];
+  /** exact rule versions used — changed rule logic changes the snapshot */
+  ruleVersions: Record<string, string>;
   ambiguities: string[];
   /** filled after digesting */
   digest?: string;

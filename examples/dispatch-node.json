@@ -1,0 +1,93 @@
+{
+  "schema": "tidepool-dispatch-v1",
+  "createdAt": 1783983059352,
+  "snapshotDigest": "804fa895be856a4b34828069613dfda2c6d77ae9328379062ae925d658fa7dbb",
+  "snapshotWindow": {
+    "from": 1699999999999,
+    "to": 1700007200000
+  },
+  "targets": [
+    {
+      "path": "/example/service",
+      "classes": [
+        "node-project"
+      ],
+      "languages": [
+        "javascript"
+      ],
+      "buildSystems": [
+        "npm"
+      ],
+      "manifests": [
+        "package-lock.json",
+        "package.json"
+      ],
+      "dependencies": [
+        {
+          "ecosystem": "npm",
+          "name": "express",
+          "version": "5.2.0",
+          "origin": "package-lock.json"
+        }
+      ],
+      "baseImages": [],
+      "fingerprint": "fecdf864965119609c65f3dcb850db0ef0f17d15dac545dca16b36855266b439"
+    }
+  ],
+  "findings": [
+    {
+      "path": "/example/service",
+      "kind": "security-review-required",
+      "subject": "code/npm/express",
+      "summary": "express: 1 joined advisories; local 5.2.0 vs upstream 5.2.1.",
+      "confidence": 0.8,
+      "confidenceBasis": "advisory join / advisory change records on the exact package name",
+      "evidence": {
+        "snapshotEntities": [
+          "code/npm/express"
+        ],
+        "changes": [],
+        "localOrigins": [
+          "package-lock.json"
+        ]
+      },
+      "recommendedAction": "review the advisories against the locally locked version"
+    },
+    {
+      "path": "/example/service",
+      "kind": "dependency-update-available",
+      "subject": "code/npm/express",
+      "summary": "express: local 5.2.0 < upstream 5.2.1 (code/npm).",
+      "confidence": 0.9,
+      "confidenceBasis": "dpkg-semantic comparison of locked version vs snapshot current",
+      "evidence": {
+        "snapshotEntities": [
+          "code/npm/express"
+        ],
+        "changes": [
+          "12c3dcad2668e07b6c642d83ff16d82560da619e6b2ee9a215ba57cfabbdaf2a"
+        ],
+        "localOrigins": [
+          "package-lock.json"
+        ]
+      },
+      "recommendedAction": "update express to 5.2.1 and re-lock"
+    }
+  ],
+  "sharedExposure": [],
+  "ambiguities": [],
+  "analyzerVersions": {
+    "classifier": "1",
+    "fingerprint": "1",
+    "rust-workspace": "1",
+    "node-project": "1",
+    "python-project": "1",
+    "c-cpp-project": "1",
+    "linux-package": "1",
+    "container-image": "1",
+    "kernel-module": "1",
+    "dispatch": "1"
+  },
+  "digest": "37381d72a7d0c1e45453dd6feefcda53864276e4841c0284d332687ccbd80c56",
+  "generatedAt": 1700007200000
+}

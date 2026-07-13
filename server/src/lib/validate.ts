@@ -125,7 +125,7 @@ const ECOSYSTEMS = [
 const ADVISORY_KINDS = ["ubuntu-notices", "alpine-secdb", "arch-avg", "osv-on-demand", "none"] as const;
 const CHANGE_KINDS = [
   "package-added", "package-removed", "version-moved", "metadata-changed",
-  "advisory-published", "advisory-modified", "advisory-no-longer-observed",
+  "advisory-published", "advisory-modified", "advisory-withdrawn", "advisory-left-coverage-window", "advisory-no-longer-observed",
   "source-failure", "source-recovery", "verification-transition", "signer-transition",
 ] as const;
 const STAGES = ["observation", "churn", "interpretive"] as const;
@@ -331,7 +331,7 @@ export function validateExportManifest(v2: unknown, where: string): { manifest?:
   if (typeof v2 !== "object" || v2 === null || Array.isArray(v2)) return { errors: [`${where}: expected object`] };
   const o = v2 as Record<string, unknown>;
   str(c, o.tidepoolVersion, `${where}.tidepoolVersion`, { max: 40 });
-  enumOf(c, o.mode, `${where}.mode`, ["full", "thin"] as const);
+  enumOf(c, o.mode, `${where}.mode`, ["full", "thin", "database-only", "referenced-objects"] as const);
   str(c, o.exportedAt, `${where}.exportedAt`, { max: 40 });
   str(c, o.databaseDigest, `${where}.databaseDigest`, { pattern: HEX64, what: "must be a 64-hex digest" });
   const migs = arr(c, o.migrations, `${where}.migrations`, { min: 1, max: 1000 });

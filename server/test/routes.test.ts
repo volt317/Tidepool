@@ -12,7 +12,7 @@ import express from "express";
 import type { PackageRow, SourceRecord, TidepoolConfig } from "../../shared/types.js";
 import { Aggregator, type UnitProvider, type IndexResult, type AdvisoryJoin } from "../src/core/aggregator.js";
 import { digestOf } from "../src/core/inflow.js";
-import { ObservationStore } from "../src/core/store.js";
+import { SqliteObservationStore } from "../src/core/store.js";
 import { SnapshotStore } from "../src/core/snapshot.js";
 import { buildRouter } from "../src/core/routes.js";
 import { DiskCache } from "../src/lib/util.js";
@@ -50,7 +50,7 @@ const j = async (path: string, init?: RequestInit) => {
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), "tp-routes-"));
-  const store = new ObservationStore(join(dir, "data"));
+  const store = new SqliteObservationStore(join(dir, "data"));
   const agg = new Aggregator(
     [stub("alpha-unit", { express: "5.2.1", lodash: "4.18.1" })],
     new DiskCache(join(dir, "cache")),

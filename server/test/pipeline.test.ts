@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { SnapshotDoc, PackageRow, SourceRecord, TidepoolConfig } from "../../shared/types.js";
 import { exportSnapshot, SnapshotStore } from "../src/core/snapshot.js";
 import { digestOf } from "../src/core/inflow.js";
-import { ObservationStore } from "../src/core/store.js";
+import { SqliteObservationStore } from "../src/core/store.js";
 import { Aggregator, mapLimit, type UnitProvider, type IndexResult, type AdvisoryJoin } from "../src/core/aggregator.js";
 import { DiskCache, tarEntries } from "../src/lib/util.js";
 import { classifyPath, analyzeAgainstSnapshot } from "../src/dispatch/analyze.js";
@@ -37,7 +37,7 @@ const sampleDoc = (): SnapshotDoc => {
     ],
     notObserved: ["code/npm/surface:mirror: latest collection failed (HTTP 503)"],
     entities: [
-      { domain: "code", unit: "npm", name: "express", source: "express", versions: { api: "5.2.1" }, current: "5.2.1", drift: false, advisoryCount: 1 },
+      { domain: "code", unit: "npm", name: "express", source: "express", versions: { api: "5.2.1" }, current: "5.2.1", ordering: "native", drift: false, advisoryCount: 1 },
     ],
     observations: [],
     changes: [
@@ -48,6 +48,7 @@ const sampleDoc = (): SnapshotDoc => {
     ],
     relationships: [],
     findings: [],
+    ruleVersions: {},
     ambiguities: ["test ambiguity"],
   };
   doc.digest = digestOf({ ...doc, createdAt: 0 });
@@ -132,7 +133,7 @@ test("Aggregator: sync → summaries → inflow observations; re-sync detects mo
   const dir = mkdtempSync(join(tmpdir(), "tp-agg-"));
   try {
     const disk = new DiskCache(join(dir, "cache"));
-    const store = new ObservationStore(join(dir, "data"));
+    const store = new SqliteObservationStore(join(dir, "data"));
     const config = { server: {}, distros: [] } as unknown as TidepoolConfig;
 
     const p1 = stubProvider({ alpha: "1.0.0", beta: "2.0.0" });
@@ -180,7 +181,7 @@ test("Aggregator: a unit whose only source fails is an error state, recorded as 
           packages: [],
         }),
     });
-    const store = new ObservationStore(join(dir, "data"));
+    const store = new SqliteObservationStore(join(dir, "data"));
     const agg = new Aggregator([failing], new DiskCache(join(dir, "cache")), { server: {}, distros: [] } as unknown as TidepoolConfig, store);
     const st = await agg.sync(failing, { force: true });
     assert.equal(st.status, "error");

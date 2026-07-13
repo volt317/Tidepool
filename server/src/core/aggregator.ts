@@ -26,12 +26,21 @@ import type {
 import type { DiskCache } from "../lib/util.js";
 import { debCompare } from "../lib/util.js";
 import { eolForSlug, githubReleases, osvForPackage, type EnrichRecordT } from "./enrich.js";
-import type { AdvisoryRecordLite, IndexRecordLite } from "./inflow.js";
+import type { AdvisoryRecordLite, CoverageMode, IndexRecordLite } from "./inflow.js";
 import type { ObservationStore } from "./store.js";
+
+export interface RawArtifact {
+  bytes: Buffer;
+  role: "release-metadata" | "signature" | "package-index" | "advisory-feed" | "registry-response";
+  url: string;
+  mediaType: string;
+}
 
 export interface IndexResult {
   sources: SourceRecord[];
   packages: PackageRow[];
+  /** exact fetched artifacts worth preserving, keyed by source id */
+  rawArtifacts?: Record<string, RawArtifact[]>;
 }
 
 export interface AdvisoryJoin {
@@ -180,12 +189,30 @@ export class Aggregator {
     sources: SourceRecord[],
     packages: PackageRow[],
     byPackage: Record<string, JoinedAdvisory[]>,
-    collectedAt: number
+    collectedAt: number,
+    rawArtifacts?: Record<string, RawArtifact[]>
   ): void {
     for (const source of sources) {
+      // preserve exact fetched artifacts (spec: "whenever practical") — the
+      // apt chain stores InRelease + Packages.gz so signatures and digests
+      // can be re-verified offline from the corpus alone
+      for (const raw of rawArtifacts?.[source.id] ?? []) {
+        this.store.storeArtifact(raw.bytes, { mediaType: raw.mediaType, role: raw.role, fetchedUrl: raw.url });
+      }
       const { records, kind } = this.sourceRecords(source, packages, byPackage);
       const limitations: string[] = [];
       if (source.note) limitations.push(source.note);
+      // structural coverage claim per source class: archive pockets/repos
+      // observe the whole surface; scope-listed registries and on-demand
+      // advisory queries are explicitly bounded; paged feeds are bounded-pages
+      const coverageMode: CoverageMode =
+        source.id.startsWith("pocket:") || source.id.startsWith("repo:")
+          ? "complete"
+          : source.id === "advisories:ubuntu-notices" || source.id === "advisories:avg"
+            ? "bounded-pages"
+            : source.id === "advisories:secdb"
+              ? "complete"
+              : "explicit-scope";
       this.store.recordCollection({
         domain: p.domain,
         unitId: p.id,
@@ -201,6 +228,7 @@ export class Aggregator {
         signedBy: source.signedBy ?? [],
         limitations,
         rawArtifactDigest: source.artifactDigest ?? null,
+        coverageMode,
         parserVersion: p.parserVersion,
         configVersion: p.configVersion,
         recordKind: kind,
@@ -285,7 +313,7 @@ export class Aggregator {
       if (st.status === "error") st.error = "no index source succeeded — see per-source errors";
       st.finishedAt = Date.now();
       // inflow: every real collection becomes immutable observations + changes
-      this.recordInflow(p, [...index.sources, adv.source], index.packages, adv.byPackage, st.finishedAt);
+      this.recordInflow(p, [...index.sources, adv.source], index.packages, adv.byPackage, st.finishedAt, index.rawArtifacts);
       this.disk.set<IndexCachePayload>(`index-${k}`, { sources: index.sources, packages: index.packages });
       this.disk.set<AdvisoryCachePayload>(`advisories-${k}`, { source: adv.source, byPackage: adv.byPackage });
     } catch (e) {

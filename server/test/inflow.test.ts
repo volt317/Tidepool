@@ -148,7 +148,7 @@ test("heuristics: corrective-release fires on rapid repeat moves, not singletons
     observations: [],
     changes: [change("version-moved", { package: "left-pad", to: "1.0.1" })] as never,
   });
-  assert.ok(!single.some((f) => f.ruleId === "inflow.corrective-release"));
+  assert.ok(!single.findings.some((f) => f.ruleId === "inflow.corrective-release"));
 
   const rapid = runHeuristics({
     window,
@@ -158,7 +158,7 @@ test("heuristics: corrective-release fires on rapid repeat moves, not singletons
       change("version-moved", { package: "left-pad", from: "1.0.1", to: "1.0.2", detectedAt: 1700000600000 }),
     ] as never,
   });
-  const f = rapid.find((x) => x.ruleId === "inflow.corrective-release");
+  const f = rapid.findings.find((x) => x.ruleId === "inflow.corrective-release");
   assert.ok(f, "two moves within 72h fire the rule");
   assert.equal(f?.evidence.changes.length, 2, "evidence references both changes");
   assert.ok((f?.ambiguities.length ?? 0) > 0, "the rule declares its own ambiguity");
@@ -167,9 +167,9 @@ test("heuristics: corrective-release fires on rapid repeat moves, not singletons
 test("heuristics: security-burst thresholds at 5 publications", () => {
   const window = { from: 0, to: 1 };
   const four = Array.from({ length: 4 }, (_, i) => change("advisory-published", { package: `p${i}`, to: `ADV-${i}` }));
-  assert.ok(!runHeuristics({ window, observations: [], changes: four as never }).some((f) => f.ruleId === "inflow.security-burst"));
+  assert.ok(!runHeuristics({ window, observations: [], changes: four as never }).findings.some((f) => f.ruleId === "inflow.security-burst"));
   const five = [...four, change("advisory-published", { package: "p4", to: "ADV-4" })];
-  const f = runHeuristics({ window, observations: [], changes: five as never }).find((x) => x.ruleId === "inflow.security-burst");
+  const f = runHeuristics({ window, observations: [], changes: five as never }).findings.find((x) => x.ruleId === "inflow.security-burst");
   assert.ok(f);
   assert.equal(f?.severityHint, "attention");
 });
@@ -180,7 +180,7 @@ test("heuristics: source-degradation only when failure has no later recovery", (
     change("source-failure", { detectedAt: 100 }),
     change("source-recovery", { detectedAt: 200 }),
   ];
-  assert.ok(!runHeuristics({ window, observations: [], changes: failThenRecover as never }).some((f) => f.ruleId === "inflow.source-degradation"));
+  assert.ok(!runHeuristics({ window, observations: [], changes: failThenRecover as never }).findings.some((f) => f.ruleId === "inflow.source-degradation"));
   const stillDown = [change("source-recovery", { detectedAt: 100 }), change("source-failure", { detectedAt: 200 })];
-  assert.ok(runHeuristics({ window, observations: [], changes: stillDown as never }).some((f) => f.ruleId === "inflow.source-degradation"));
+  assert.ok(runHeuristics({ window, observations: [], changes: stillDown as never }).findings.some((f) => f.ruleId === "inflow.source-degradation"));
 });

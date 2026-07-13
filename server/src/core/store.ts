@@ -26,7 +26,16 @@ import type {
   Verification,
 } from "../../../shared/types.js";
 import { iso, fromIso, openDatabase, sqliteModule, type OpenedDb, type SqliteDatabase } from "./db.js";
-import { detectChanges, digestOf, stableStringify, type AdvisoryRecordLite, type IndexRecordLite } from "./inflow.js";
+import {
+  detectChanges,
+  digestOf,
+  stableStringify,
+  type AdvisoryRecordLite,
+  type CoverageMode,
+  type IndexRecordLite,
+} from "./inflow.js";
+import { newestOf } from "../lib/versions.js";
+import type { SnapshotEntity } from "../../../shared/types.js";
 import { parseJsonCorpus, readCorpus } from "../lib/corpus.js";
 import { sha256hex } from "../lib/util.js";
 
@@ -49,10 +58,26 @@ export interface CollectionInput {
   limitations: string[];
   /** collector-reported digest of the raw fetched artifact, when it has one */
   rawArtifactDigest: string | null;
+  /** structural coverage claim for this source (complete vs bounded vs scoped) */
+  coverageMode: CoverageMode;
   parserVersion: string;
   configVersion: string;
   recordKind: "index" | "advisory";
   records: IndexRecordLite[] | AdvisoryRecordLite[];
+}
+
+export interface AppendResult {
+  observationId: string;
+  normalizedDigest: string;
+  newStates: number;
+  analysisStatus: "pending";
+}
+
+export interface AnalysisResult {
+  observationId: string;
+  status: "complete" | "failed";
+  changes: ChangeRecord[];
+  error?: string;
 }
 
 export interface CollectionResult {
@@ -60,6 +85,58 @@ export interface CollectionResult {
   normalizedDigest: string;
   newStates: number;
   changes: ChangeRecord[];
+  analysis: { status: "complete" | "failed"; error?: string };
+}
+
+/**
+ * The durable storage boundary. Everything above the storage layer —
+ * collectors, providers, snapshot builders, routes, dispatch — depends on
+ * this interface, never on SQLite (or any file layout) directly.
+ */
+export interface ObservationStore {
+  registerSource(inp: Pick<CollectionInput, "domain" | "unitId" | "sourceType" | "authority" | "canonicalUrl" | "configVersion">): string;
+  storeArtifact(bytes: Buffer, meta: { mediaType: string; role: string; fetchedUrl?: string | null }): string;
+  /** collection phase: preserve the observation regardless of later analysis */
+  appendObservation(inp: CollectionInput): AppendResult;
+  /** analysis phase: derive changes; failure never erases the observation */
+  analyzeObservation(observationId: string): AnalysisResult;
+  /** convenience: appendObservation + analyzeObservation */
+  recordCollection(inp: CollectionInput): CollectionResult;
+  previousObservation(sourceId: string, before: number): Observation | null;
+  observationsFor(domain: string, unitId: string, opts?: { from?: number; to?: number }): Observation[];
+  changesFor(domain: string, unitId: string, opts?: { from?: number; to?: number }): ChangeRecord[];
+  sourceStateAt(sourceId: string, at: number): HistoricalSourceState;
+  unitStateAt(domain: string, unitId: string, at: number): HistoricalUnitState;
+  sourceHead(sourceId: string): SourceHead | null;
+  verifyCorpus(): CorpusVerification;
+  counts(): Record<string, number>;
+}
+
+export interface HistoricalSourceState {
+  /** latest observation at or before the boundary, any status */
+  atBoundary: Observation | null;
+  /** latest SUCCESSFUL observation at or before the boundary — state source */
+  lastSuccessful: Observation | null;
+  records: unknown[];
+}
+
+export interface HistoricalUnitState {
+  kind: string;
+  entities: SnapshotEntity[];
+  sources: ReconstructedSource[];
+}
+
+export interface SourceHead {
+  sourceId: string;
+  latestObservationId: string;
+  latestSuccessfulId: string | null;
+  collectedAt: number;
+  status: string;
+}
+
+export interface CorpusVerification {
+  ok: boolean;
+  checks: { name: string; ok: boolean; detail: string }[];
 }
 
 export interface ReconstructedSource {
@@ -72,7 +149,7 @@ export interface ReconstructedSource {
 
 const objectPath = (root: string, digest: string): string => join(root, "objects", "sha256", digest.slice(0, 2), digest);
 
-export class ObservationStore {
+export class SqliteObservationStore implements ObservationStore {
   readonly dataDir: string;
   readonly opened: OpenedDb;
   private db: SqliteDatabase;
@@ -183,7 +260,7 @@ export class ObservationStore {
   //     update source head
   //   COMMIT
 
-  recordCollection(inp: CollectionInput): CollectionResult {
+  appendObservation(inp: CollectionInput): AppendResult {
     const sourceId = this.registerSource(inp);
     const effective = inp.status === "ok" ? inp.records : [];
     const body = Buffer.from(stableStringify(effective));
@@ -199,17 +276,11 @@ export class ObservationStore {
       status: inp.status,
     });
 
-    const prev = this.headObservation(sourceId);
-    const prevRecords = prev ? ((this.readNormalized(prev.recordsDigest) ?? []) as IndexRecordLite[]) : [];
-
-    // the normalized record corpus is itself a content-addressed object —
-    // identical re-observations reuse it (unchanged-content deduplication)
+    // the normalized record corpus is a content-addressed object — identical
+    // re-observations reuse it (unchanged-content deduplication)
     this.storeArtifact(body, { mediaType: "application/json", role: "normalized-records" });
     if (inp.rawArtifactDigest && /^[0-9a-f]{64}$/.test(inp.rawArtifactDigest))
       this.registerReportedArtifact(inp.rawArtifactDigest, inp.canonicalUrl);
-
-    const obsDto = this.toObservationDto(inp, sourceId, observationId, normalizedDigest, effective.length);
-    const changes = detectChanges(prev, obsDto, prevRecords, effective, inp.recordKind);
 
     const contentIsNew = !this.db
       .prepare("SELECT o.id FROM observations o WHERE o.source_id = ? AND o.normalized_digest = ? AND EXISTS (SELECT 1 FROM entity_states es WHERE es.observation_id = o.id) LIMIT 1")
@@ -222,8 +293,8 @@ export class ObservationStore {
         .prepare(
           `INSERT INTO observations (id, source_id, collected_at, fetch_started_at, fetch_finished_at, status,
              artifact_digest, normalized_digest, verification_level, signer_fingerprint, verification_json,
-             coverage_complete, coverage_json, parser_name, parser_version, config_digest, error_json, metadata_json)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             coverage_complete, coverage_json, parser_name, parser_version, config_digest, analysis_status, error_json, metadata_json)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
         )
         .run(
           observationId, sourceId, iso(inp.collectedAt), iso(inp.collectedAt), inp.status,
@@ -232,8 +303,8 @@ export class ObservationStore {
           inp.verification ?? null,
           inp.signedBy.join("; ") || null,
           stableStringify({ signedBy: inp.signedBy }),
-          inp.limitations.length === 0 ? 1 : 0,
-          stableStringify({ observed: effective.length, limitations: inp.limitations }),
+          inp.coverageMode === "complete" && inp.limitations.length === 0 ? 1 : 0,
+          stableStringify({ mode: inp.coverageMode, complete: inp.coverageMode === "complete" && inp.limitations.length === 0, observed: effective.length, limitations: inp.limitations }),
           `${inp.domain}-collector`,
           inp.parserVersion,
           inp.configVersion,
@@ -245,44 +316,96 @@ export class ObservationStore {
         newStates = this.insertEntityStates(inp, observationId, effective);
       }
 
-      const insChange = this.db.prepare(
-        `INSERT INTO changes (id, domain, unit_id, source_id, entity_id, previous_observation_id,
-           current_observation_id, change_type, detected_at, previous_state_digest, current_state_digest, details_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      );
-      const prevByName = new Map((prevRecords as { name?: string; package?: string }[]).map((r) => [r.name ?? r.package ?? "", r]));
-      const currByName = new Map((effective as { name?: string; package?: string }[]).map((r) => [r.name ?? r.package ?? "", r]));
-      for (const c of changes) {
-        const entityId = c.package ? this.entityIdFor(inp, c.package) : null;
-        const prevRec = c.package ? prevByName.get(c.package) : undefined;
-        const currRec = c.package ? currByName.get(c.package) : undefined;
-        insChange.run(
-          c.id, c.domain, c.unit, sourceId, entityId, c.fromObservation, c.toObservation, c.kind, iso(c.detectedAt),
-          prevRec ? digestOf(prevRec) : null,
-          currRec ? digestOf(currRec) : null,
-          stableStringify({
-            fields: c.from !== undefined || c.to !== undefined ? [{ field: fieldOfKind(c.kind), from: c.from ?? null, to: c.to ?? null }] : [],
-            detail: c.detail ?? null,
-            sourceType: inp.sourceType,
-          })
-        );
-      }
-
+      // dual heads: what happened most recently vs the last time it worked
       this.db
         .prepare(
-          `INSERT INTO source_heads (source_id, observation_id, collected_at, normalized_digest, status)
+          `INSERT INTO source_heads (source_id, latest_observation_id, collected_at, normalized_digest, status)
            VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(source_id) DO UPDATE SET observation_id = excluded.observation_id,
+           ON CONFLICT(source_id) DO UPDATE SET latest_observation_id = excluded.latest_observation_id,
              collected_at = excluded.collected_at, normalized_digest = excluded.normalized_digest, status = excluded.status`
         )
         .run(sourceId, observationId, iso(inp.collectedAt), normalizedDigest, inp.status);
+      if (inp.status === "ok") {
+        this.db.prepare("UPDATE source_heads SET latest_successful_id = ? WHERE source_id = ?").run(observationId, sourceId);
+      }
 
       this.db.exec("COMMIT");
     } catch (e) {
       this.db.exec("ROLLBACK");
       throw e;
     }
-    return { observationId, normalizedDigest, newStates, changes };
+    return { observationId, normalizedDigest, newStates, analysisStatus: "pending" };
+  }
+
+  /** Analysis is separate and retryable: a diffing failure marks the
+   *  observation analysis_status='failed' but the evidence stays preserved. */
+  analyzeObservation(observationId: string): AnalysisResult {
+    const row = this.db
+      .prepare(`SELECT ${this.obsColumns}, o.source_id AS db_source_id FROM observations o JOIN sources s ON s.id = o.source_id WHERE o.id = ?`)
+      .get(observationId);
+    if (!row) return { observationId, status: "failed", changes: [], error: "unknown observation" };
+    const dbSourceId = String(row.db_source_id);
+    const obs = this.rowToObservation(row);
+    const meta = row.metadata_json ? (parseJsonCorpus(String(row.metadata_json), "obs meta") as { recordKind?: string; unitKind?: string }) : {};
+    const cov = row.coverage_json ? (parseJsonCorpus(String(row.coverage_json), "obs coverage") as { mode?: CoverageMode }) : {};
+    const kind = meta.recordKind === "advisory" ? "advisory" : "index";
+
+    try {
+      const prev = this.previousObservation(dbSourceId, obs.collectedAt);
+      const prevRecords = prev && prev.status === "ok" ? ((this.readNormalized(prev.recordsDigest) ?? []) as IndexRecordLite[]) : [];
+      const records = obs.status === "ok" ? ((this.readNormalized(obs.recordsDigest) ?? []) as IndexRecordLite[]) : [];
+      const changes = detectChanges(prev, obs, prevRecords, records, kind, cov.mode);
+
+      const inpLike = { domain: obs.domain, unitKind: meta.unitKind ?? "unknown", recordKind: kind } as Pick<CollectionInput, "domain" | "unitKind" | "recordKind">;
+      const prevByName = new Map((prevRecords as { name?: string; package?: string }[]).map((r) => [r.name ?? r.package ?? "", r]));
+      const currByName = new Map((records as { name?: string; package?: string }[]).map((r) => [r.name ?? r.package ?? "", r]));
+
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        const insChange = this.db.prepare(
+          `INSERT INTO changes (id, domain, unit_id, source_id, entity_id, previous_observation_id,
+             current_observation_id, change_type, detected_at, previous_state_digest, current_state_digest, details_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+        );
+        for (const c of changes) {
+          const entityId = c.package ? this.entityIdFor(inpLike, c.package) : null;
+          const prevRec = c.package ? prevByName.get(c.package) : undefined;
+          const currRec = c.package ? currByName.get(c.package) : undefined;
+          const fields =
+            c.fields ??
+            (c.from !== undefined || c.to !== undefined
+              ? { [fieldOfKind(c.kind)]: { from: c.from ?? null, to: c.to ?? null } }
+              : {});
+          insChange.run(
+            c.id, c.domain, c.unit, dbSourceId, entityId, c.fromObservation, c.toObservation, c.kind, iso(c.detectedAt),
+            prevRec ? digestOf(prevRec) : null,
+            currRec ? digestOf(currRec) : null,
+            stableStringify({ fields, detail: c.detail ?? null, sourceType: obs.sourceId })
+          );
+        }
+        this.db.prepare("UPDATE observations SET analysis_status = 'complete' WHERE id = ?").run(observationId);
+        this.db.exec("COMMIT");
+      } catch (e) {
+        this.db.exec("ROLLBACK");
+        throw e;
+      }
+      return { observationId, status: "complete", changes };
+    } catch (e) {
+      this.db.prepare("UPDATE observations SET analysis_status = 'failed' WHERE id = ?").run(observationId);
+      return { observationId, status: "failed", changes: [], error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  recordCollection(inp: CollectionInput): CollectionResult {
+    const appended = this.appendObservation(inp);
+    const analysis = this.analyzeObservation(appended.observationId);
+    return {
+      observationId: appended.observationId,
+      normalizedDigest: appended.normalizedDigest,
+      newStates: appended.newStates,
+      changes: analysis.changes,
+      analysis: { status: analysis.status, error: analysis.error },
+    };
   }
 
   private entityIdentity(inp: Pick<CollectionInput, "domain" | "unitKind" | "recordKind">, name: string) {
@@ -340,35 +463,6 @@ export class ObservationStore {
     return bytes ? parseJsonCorpus(bytes.toString("utf8"), `normalized ${digest.slice(0, 12)}`) : null;
   }
 
-  private toObservationDto(
-    inp: CollectionInput,
-    sourceId: string,
-    observationId: string,
-    normalizedDigest: string,
-    recordCount: number
-  ): Observation {
-    void sourceId;
-    return {
-      id: observationId,
-      domain: inp.domain,
-      unit: inp.unitId,
-      authority: inp.authority,
-      sourceId: inp.sourceType,
-      collectedAt: inp.collectedAt,
-      scope: inp.scope,
-      verification: inp.verification,
-      signedBy: inp.signedBy,
-      status: inp.status,
-      error: inp.error,
-      coverage: { observed: recordCount, limitations: inp.limitations },
-      artifactDigest: inp.rawArtifactDigest,
-      parserVersion: inp.parserVersion,
-      configVersion: inp.configVersion,
-      recordsDigest: normalizedDigest,
-      recordCount,
-    };
-  }
-
   private rowToObservation(r: Record<string, unknown>): Observation {
     const meta = r.metadata_json ? (parseJsonCorpus(String(r.metadata_json), "observation metadata") as Record<string, unknown>) : {};
     const cov = r.coverage_json ? (parseJsonCorpus(String(r.coverage_json), "observation coverage") as { observed?: number; limitations?: string[] }) : {};
@@ -403,11 +497,33 @@ export class ObservationStore {
     const r = this.db
       .prepare(
         `SELECT ${this.obsColumns} FROM source_heads h
-           JOIN observations o ON o.id = h.observation_id
+           JOIN observations o ON o.id = h.latest_observation_id
            JOIN sources s ON s.id = o.source_id
          WHERE h.source_id = ?`
       )
       .get(sourceId);
+    return r ? this.rowToObservation(r) : null;
+  }
+
+  sourceHead(sourceId: string): SourceHead | null {
+    const r = this.db.prepare("SELECT * FROM source_heads WHERE source_id = ?").get(sourceId);
+    if (!r) return null;
+    return {
+      sourceId,
+      latestObservationId: String(r.latest_observation_id),
+      latestSuccessfulId: r.latest_successful_id ? String(r.latest_successful_id) : null,
+      collectedAt: fromIso(String(r.collected_at)),
+      status: String(r.status),
+    };
+  }
+
+  previousObservation(sourceId: string, before: number): Observation | null {
+    const r = this.db
+      .prepare(
+        `SELECT ${this.obsColumns} FROM observations o JOIN sources s ON s.id = o.source_id
+         WHERE o.source_id = ? AND o.collected_at < ? ORDER BY o.collected_at DESC LIMIT 1`
+      )
+      .get(sourceId, iso(before));
     return r ? this.rowToObservation(r) : null;
   }
 
@@ -424,21 +540,23 @@ export class ObservationStore {
 
   private rowToChange(r: Record<string, unknown>): ChangeRecord {
     const details = parseJsonCorpus(String(r.details_json), "change details") as {
-      fields?: { field: string; from: string | null; to: string | null }[];
+      fields?: Record<string, { from: string | null; to: string | null }>;
       detail?: string | null;
       sourceType?: string;
     };
-    const f = details.fields?.[0];
+    const kind = String(r.change_type) as ChangeRecord["kind"];
+    const primary = details.fields?.[fieldOfKind(kind)] ?? Object.values(details.fields ?? {})[0];
     return {
       id: String(r.id),
       domain: String(r.domain) as DomainId,
       unit: String(r.unit_id),
       sourceId: String(details.sourceType ?? r.source_id),
-      kind: String(r.change_type) as ChangeRecord["kind"],
+      kind,
       package: r.entity_name ? String(r.entity_name) : undefined,
-      from: f?.from ?? undefined,
-      to: f?.to ?? undefined,
+      from: primary?.from ?? undefined,
+      to: primary?.to ?? undefined,
       detail: details.detail ?? undefined,
+      fields: details.fields && Object.keys(details.fields).length ? details.fields : undefined,
       fromObservation: r.previous_observation_id ? String(r.previous_observation_id) : null,
       toObservation: String(r.current_observation_id),
       detectedAt: fromIso(String(r.detected_at)),
@@ -460,24 +578,26 @@ export class ObservationStore {
   }
 
   /**
-   * Historical reconstruction primitive: the state of one source as it was
-   * known at `at` — the latest observation at or before the boundary, and the
-   * normalized records that observation's content digest points at. Later
-   * observations are invisible by construction; source heads are NOT used.
+   * Historical reconstruction primitive. The boundary observation (latest at
+   * or before `at`, any status) describes what was KNOWN; the last successful
+   * observation supplies the STATE. Later observations are invisible by
+   * construction; source heads are never consulted.
    */
-  queryStateAt(sourceId: string, at: number): { observation: Observation | null; records: unknown[] } {
-    const r = this.db
-      .prepare(
-        `SELECT ${this.obsColumns} FROM observations o JOIN sources s ON s.id = o.source_id
-         WHERE o.source_id = ? AND o.collected_at <= ?
-         ORDER BY o.collected_at DESC LIMIT 1`
-      )
-      .get(sourceId, iso(at));
-    if (!r) return { observation: null, records: [] };
-    const obs = this.rowToObservation(r);
-    if (obs.status !== "ok") return { observation: obs, records: [] };
-    const records = (this.readNormalized(obs.recordsDigest) as unknown[]) ?? [];
-    return { observation: obs, records };
+  sourceStateAt(sourceId: string, at: number): HistoricalSourceState {
+    const pick = (successOnly: boolean) => {
+      const r = this.db
+        .prepare(
+          `SELECT ${this.obsColumns} FROM observations o JOIN sources s ON s.id = o.source_id
+           WHERE o.source_id = ? AND o.collected_at <= ? ${successOnly ? "AND o.status = 'ok'" : ""}
+           ORDER BY o.collected_at DESC LIMIT 1`
+        )
+        .get(sourceId, iso(at));
+      return r ? this.rowToObservation(r) : null;
+    };
+    const atBoundary = pick(false);
+    const lastSuccessful = atBoundary?.status === "ok" ? atBoundary : pick(true);
+    const records = lastSuccessful ? ((this.readNormalized(lastSuccessful.recordsDigest) as unknown[]) ?? []) : [];
+    return { atBoundary, lastSuccessful, records };
   }
 
   /** Everything the snapshot builder needs for one unit, reconstructed at
@@ -487,38 +607,91 @@ export class ObservationStore {
       .prepare("SELECT id, source_type FROM sources WHERE domain = ? AND unit_id = ? ORDER BY source_type")
       .all(domain, unitId);
     const out: ReconstructedSource[] = [];
-    for (const s of srcs) {
-      const { observation, records } = this.queryStateAt(String(s.id), window.to);
-      const meta = observation
+    for (const s2 of srcs) {
+      const { atBoundary, lastSuccessful, records } = this.sourceStateAt(String(s2.id), window.to);
+      const limitations = [...(atBoundary?.coverage.limitations ?? [])];
+      if (atBoundary && atBoundary.status === "error" && lastSuccessful) {
+        limitations.push(`source failing at the boundary; state shown is the last successful observation (${iso(lastSuccessful.collectedAt)})`);
+      }
+      const meta = atBoundary
         ? {
-            status: observation.status,
-            verification: observation.verification,
-            signedBy: observation.signedBy,
-            recordCount: observation.recordCount,
-            collectedAt: observation.collectedAt as number | null,
-            error: observation.error ?? null,
-            limitations: observation.coverage.limitations,
+            status: atBoundary.status,
+            verification: (lastSuccessful ?? atBoundary).verification,
+            signedBy: (lastSuccessful ?? atBoundary).signedBy,
+            recordCount: lastSuccessful?.recordCount ?? 0,
+            collectedAt: atBoundary.collectedAt as number | null,
+            error: atBoundary.error ?? null,
+            limitations,
           }
         : { status: "unobserved" as const, verification: null, signedBy: [], recordCount: 0, collectedAt: null, error: null, limitations: [] };
-      const rkMeta = observation ? (this.db.prepare("SELECT metadata_json FROM observations WHERE id = ?").get(observation.id)) : null;
-      const recordKind = rkMeta?.metadata_json
-        ? ((parseJsonCorpus(String(rkMeta.metadata_json), "obs meta") as { recordKind?: string }).recordKind === "advisory" ? "advisory" : "index")
-        : String(s.source_type).startsWith("advisories:") ? "advisory" : "index";
+      const kindMeta = (lastSuccessful ?? atBoundary)
+        ? (this.db.prepare("SELECT metadata_json FROM observations WHERE id = ?").get((lastSuccessful ?? atBoundary)!.id))
+        : null;
+      const recordKind = kindMeta?.metadata_json
+        ? ((parseJsonCorpus(String(kindMeta.metadata_json), "obs meta") as { recordKind?: string }).recordKind === "advisory" ? "advisory" : "index")
+        : String(s2.source_type).startsWith("advisories:") ? "advisory" : "index";
       out.push({
-        sourceType: String(s.source_type),
+        sourceType: String(s2.source_type),
         coverage: {
           domain: domain as DomainId,
           unit: unitId,
-          authority: observation?.authority ?? "",
-          sourceId: String(s.source_type),
+          authority: atBoundary?.authority ?? "",
+          sourceId: String(s2.source_type),
           ...meta,
         },
-        observation,
+        observation: atBoundary,
         recordKind,
         records: records as IndexRecordLite[] | AdvisoryRecordLite[],
       });
     }
     return out;
+  }
+
+  /** The unit's merged state as known at `at`: reconstruction + native
+   *  ecosystem version semantics — the storage-layer home of "current". */
+  unitStateAt(domain: string, unitId: string, at: number): HistoricalUnitState {
+    const sources = this.buildSnapshotInputs(domain, unitId, { from: 0, to: at });
+    const kindRow = this.db
+      .prepare(
+        `SELECT o.metadata_json FROM observations o JOIN sources s ON s.id = o.source_id
+         WHERE s.domain = ? AND s.unit_id = ? ORDER BY o.collected_at DESC LIMIT 1`
+      )
+      .get(domain, unitId);
+    const kind = kindRow?.metadata_json
+      ? String((parseJsonCorpus(String(kindRow.metadata_json), "obs meta") as { unitKind?: string }).unitKind ?? "unknown")
+      : "unknown";
+
+    const versionsByName = new Map<string, Record<string, string>>();
+    const advisoriesByName = new Map<string, number>();
+    for (const src of sources) {
+      const suffix = src.sourceType.includes(":") ? src.sourceType.slice(src.sourceType.indexOf(":") + 1) : src.sourceType;
+      if (src.recordKind === "index") {
+        for (const r of src.records as IndexRecordLite[]) {
+          const v = versionsByName.get(r.name) ?? {};
+          v[suffix] = r.version;
+          versionsByName.set(r.name, v);
+        }
+      } else {
+        for (const r of src.records as AdvisoryRecordLite[]) advisoriesByName.set(r.package, (advisoriesByName.get(r.package) ?? 0) + 1);
+      }
+    }
+    const entities: SnapshotEntity[] = [];
+    for (const [name, versions] of [...versionsByName].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const vals = Object.values(versions);
+      const { newest, ordering } = newestOf(kind, vals);
+      entities.push({
+        domain: domain as DomainId,
+        unit: unitId,
+        name,
+        source: name,
+        versions,
+        current: newest,
+        ordering,
+        drift: new Set(vals).size > 1,
+        advisoryCount: advisoriesByName.get(name) ?? 0,
+      });
+    }
+    return { kind, entities, sources };
   }
 
   unitsWithSources(): { domain: string; unitId: string }[] {
@@ -589,6 +762,17 @@ export class ObservationStore {
     return { from: r?.a ? String(r.a) : null, to: r?.b ? String(r.b) : null };
   }
 
+  /** every object digest referenced by any observation (normalized or raw) */
+  referencedObjectDigests(): Set<string> {
+    const out = new Set<string>();
+    for (const r of this.db.prepare("SELECT DISTINCT normalized_digest AS d FROM observations WHERE normalized_digest IS NOT NULL").all()) out.add(String(r.d));
+    for (const r of this.db
+      .prepare("SELECT DISTINCT a.digest AS d FROM artifacts a JOIN observations o ON o.artifact_digest = a.digest WHERE a.storage_path IS NOT NULL")
+      .all())
+      out.add(String(r.d));
+    return out;
+  }
+
   /** normalized-record object digests referenced by the given snapshots */
   normalizedDigestsForSnapshots(snapshotIds: string[]): Set<string> {
     const out = new Set<string>();
@@ -603,20 +787,101 @@ export class ObservationStore {
 
   /** heads are a current-state optimization — rebuild them from observations */
   recomputeSourceHeads(): void {
-    const rows = this.db
+    const latest = this.db
       .prepare(
         `SELECT o.source_id, o.id, o.collected_at, o.normalized_digest, o.status FROM observations o
-           JOIN (SELECT source_id, MAX(collected_at) AS m FROM observations GROUP BY source_id) latest
-             ON latest.source_id = o.source_id AND latest.m = o.collected_at`
+           JOIN (SELECT source_id, MAX(collected_at) AS m FROM observations GROUP BY source_id) l
+             ON l.source_id = o.source_id AND l.m = o.collected_at`
       )
       .all();
-    const up = this.db.prepare(
-      `INSERT INTO source_heads (source_id, observation_id, collected_at, normalized_digest, status)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(source_id) DO UPDATE SET observation_id = excluded.observation_id,
-         collected_at = excluded.collected_at, normalized_digest = excluded.normalized_digest, status = excluded.status`
+    const success = new Map(
+      this.db
+        .prepare(
+          `SELECT o.source_id, o.id FROM observations o
+             JOIN (SELECT source_id, MAX(collected_at) AS m FROM observations WHERE status = 'ok' GROUP BY source_id) l
+               ON l.source_id = o.source_id AND l.m = o.collected_at AND o.status = 'ok'`
+        )
+        .all()
+        .map((r) => [String(r.source_id), String(r.id)])
     );
-    for (const r of rows) up.run(String(r.source_id), String(r.id), String(r.collected_at), r.normalized_digest as string | null, String(r.status));
+    const up = this.db.prepare(
+      `INSERT INTO source_heads (source_id, latest_observation_id, collected_at, normalized_digest, status, latest_successful_id)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source_id) DO UPDATE SET latest_observation_id = excluded.latest_observation_id,
+         collected_at = excluded.collected_at, normalized_digest = excluded.normalized_digest,
+         status = excluded.status, latest_successful_id = excluded.latest_successful_id`
+    );
+    for (const r of latest)
+      up.run(String(r.source_id), String(r.id), String(r.collected_at), r.normalized_digest as string | null, String(r.status), success.get(String(r.source_id)) ?? null);
+  }
+
+  // -------------------------------------------------------------- integrity
+
+  /** Corpus verification: structural integrity of the evidence store. */
+  verifyCorpus(): CorpusVerification {
+    const checks: CorpusVerification["checks"] = [];
+    const add = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
+
+    const integ = this.db.prepare("PRAGMA integrity_check").get();
+    add("sqlite-integrity", String(integ?.integrity_check) === "ok", String(integ?.integrity_check ?? "?"));
+    const fk = this.db.prepare("PRAGMA foreign_key_check").all();
+    add("foreign-keys", fk.length === 0, fk.length === 0 ? "no violations" : `${fk.length} violation(s)`);
+
+    // object store: every stored artifact exists and re-digests correctly
+    let missing = 0;
+    let corrupt = 0;
+    const stored = this.db.prepare("SELECT digest, storage_path FROM artifacts WHERE storage_path IS NOT NULL").all();
+    for (const a of stored) {
+      const bytes = this.getObjectBytes(String(a.digest));
+      if (!bytes) missing++;
+      else if (sha256hex(bytes) !== String(a.digest)) corrupt++;
+    }
+    add("object-existence", missing === 0, missing === 0 ? `${stored.length} object(s) present` : `${missing} missing`);
+    add("object-digests", corrupt === 0, corrupt === 0 ? "all re-digest correctly" : `${corrupt} corrupt object(s)`);
+
+    // normalized record sets referenced by successful observations must exist
+    const normMissing = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM observations o
+         WHERE o.status = 'ok' AND o.normalized_digest IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.digest = o.normalized_digest AND a.storage_path IS NOT NULL)`
+      )
+      .get();
+    add("normalized-records", Number(normMissing?.n ?? 0) === 0, `${Number(normMissing?.n ?? 0)} observation(s) missing their record set`);
+
+    const badHeads = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM source_heads h
+         WHERE NOT EXISTS (SELECT 1 FROM observations o WHERE o.id = h.latest_observation_id)
+            OR (h.latest_successful_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.id = h.latest_successful_id))`
+      )
+      .get();
+    add("head-references", Number(badHeads?.n ?? 0) === 0, `${Number(badHeads?.n ?? 0)} dangling head reference(s)`);
+
+    const orphanStates = this.db
+      .prepare("SELECT COUNT(*) AS n FROM entity_states es WHERE NOT EXISTS (SELECT 1 FROM observations o WHERE o.id = es.observation_id)")
+      .get();
+    add("entity-state-owners", Number(orphanStates?.n ?? 0) === 0, `${Number(orphanStates?.n ?? 0)} orphaned state(s)`);
+
+    const badSnapRefs = this.db
+      .prepare("SELECT COUNT(*) AS n FROM snapshot_observations so WHERE NOT EXISTS (SELECT 1 FROM observations o WHERE o.id = so.observation_id)")
+      .get();
+    add("snapshot-references", Number(badSnapRefs?.n ?? 0) === 0, `${Number(badSnapRefs?.n ?? 0)} dangling snapshot reference(s)`);
+
+    const pending = this.db.prepare("SELECT COUNT(*) AS n FROM observations WHERE analysis_status = 'pending'").get();
+    const failed = this.db.prepare("SELECT COUNT(*) AS n FROM observations WHERE analysis_status = 'failed'").get();
+    add("analysis-pending", Number(pending?.n ?? 0) === 0, `${Number(pending?.n ?? 0)} pending`);
+    add("analysis-failed", Number(failed?.n ?? 0) === 0, `${Number(failed?.n ?? 0)} failed (retryable)`);
+
+    const residue = readdirSync(join(this.dataDir, "objects")).filter((f) => f.startsWith(".tmp-"));
+    add("temp-residue", residue.length === 0, `${residue.length} temporary file(s)`);
+
+    return { ok: checks.every((ch) => ch.ok || ch.name === "analysis-pending"), checks };
+  }
+
+  /** reclaim incremental auto-vacuum pages — explicit, never automatic */
+  vacuumIncremental(): void {
+    this.db.exec("PRAGMA incremental_vacuum");
   }
 
   // ------------------------------------------------------------------ stats
