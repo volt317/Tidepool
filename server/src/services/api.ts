@@ -1,40 +1,44 @@
 // server/src/services/api.ts
 //
-// The API service: serves the REST read surface, the frontend, snapshot
-// listings and exports — and NOTHING that reaches upstream or writes the
-// corpus.
+// The API service: the read surface over PUBLISHED truth.
 //
-//   responsibilities  REST API, frontend, corpus queries, exports, health
-//   capabilities      read config; read corpus (query-only SQLite
-//                     connection); read the collector-written disk cache
-//   must not          perform upstream collection; write the corpus;
-//                     perform arbitrary outbound networking
+//   reads     published/tidepool-read.sqlite3 (SQLITE_OPEN_READONLY),
+//             finalized snapshots, publication metadata — and nothing else
+//   serves    REST reads, stored enrichment evidence, snapshot exports,
+//             the frontend, health (including publication state)
+//   must not  mount the writer directory (it doesn't — enforcement is the
+//             mount set, not politeness); write any corpus database; touch
+//             keyrings or the collector cache; contact the Internet; cause
+//             collection or enrichment
 //
-// REFACTOR NOTE (deployment split): the express bootstrap here was MOVED
-// from index.ts (rate limits, /api/config redaction, static serving,
-// /api/reload fail-closed semantics — all verbatim). What changed to fit
-// the service boundary:
-//   - the store opens with { readOnly: true }  → query_only connection
-//   - the Aggregator is built with { collect: false } → cache-only reads
-//   - the router mounted is the READ router only
-//   - the three control operations the web UI uses (sync, enrich, snapshot
-//     creation) are proxied over the pod-internal loopback to the collector,
-//     which is the only process allowed to do them. This is fixed-target
-//     message passing to a sibling service, not arbitrary egress.
+// Isolated-appliance evolution notes:
+//   - the collector-cache read path is GONE: state is reconstructed from
+//     the replica via core/readmodel.ts (the cache is private again — its
+//     deletion cannot change anything this service returns)
+//   - the API↔collector proxy is GONE: control operations are not part of
+//     this surface at all; sync/snapshot POSTs answer 405 pointing at the
+//     admin CLI (invariant: Internet-facing routes cannot trigger
+//     collection)
+//   - listener: a Unix socket (fronted by the proxy service) when
+//     TIDEPOOL_API_LISTEN=unix, else TCP for development. With the socket
+//     listener the container runs --network=none: "no Internet egress" is
+//     the absence of a network namespace, not a promise.
+//   - API availability does not depend on the collector: once a valid
+//     replica exists, reads keep working with the collector stopped.
 
 import express from "express";
 import rateLimit from "express-rate-limit";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { Aggregator } from "../core/aggregator.js";
-import { SqliteObservationStore } from "../core/store.js";
 import { SnapshotStore } from "../core/snapshot.js";
+import { ReplicaHandle, replicaStateFor } from "../core/readmodel.js";
 import { buildReadRouter } from "../core/routes.read.js";
 import { buildProviders } from "../domains/providers.js";
 import { DiskCache } from "../lib/util.js";
 
-import { COLLECTOR_URL, ROOT, loadConfig, makeLogger, onShutdown, resolveDirs } from "./bootstrap.js";
+import { ROOT, loadConfig, makeLogger, onShutdown, prepareSocket, resolveDirs, resolveRuntimeDirs, socketPaths } from "./bootstrap.js";
 import type { TidepoolConfig } from "../../../shared/types.js";
 
 const log = makeLogger("api");
@@ -45,58 +49,91 @@ if (!initial.config) {
   process.exit(1);
 }
 
-function build(config: TidepoolConfig): { config: TidepoolConfig; router: express.Router; store: SqliteObservationStore } {
-  const { cacheDir, dataDir } = resolveDirs(config);
-  const disk = new DiskCache(cacheDir);
-  // readOnly: query_only connection — SQLite rejects writes; migrations are
-  // verified (never applied) so schema drift fails at startup, visibly
-  const store = new SqliteObservationStore(dataDir, undefined, { readOnly: true });
-  // manifests writer deliberately NOT passed: this SnapshotStore can only
-  // load/list/export existing snapshots, never record new manifests
-  const snapshots = new SnapshotStore(join(dataDir, "snapshots"));
-  const agg = new Aggregator(buildProviders(config), disk, config, store, { collect: false });
-  return { config, router: buildReadRouter(agg, snapshots), store };
+interface Built {
+  config: TidepoolConfig;
+  router: express.Router;
+  replica: ReplicaHandle;
+  publishedDir: string;
+  dataDir: string;
 }
 
-let current: ReturnType<typeof build>;
+function build(config: TidepoolConfig): Built {
+  const { dataDir } = resolveDirs(config);
+  const { publishedDir } = resolveRuntimeDirs(config);
+  const replica = new ReplicaHandle(publishedDir, dataDir);
+  // throwaway cache dir under /tmp: the aggregator type requires one, but
+  // with a stateSource it is never consulted — the collector's cache is not
+  // mounted here at all
+  const disk = new DiskCache(join(process.env.TMPDIR ?? "/tmp", "tidepool-api-unused-cache"));
+  // the replica store is (re)opened lazily per publication; the aggregator's
+  // store reference must follow it, so hand out a live proxy
+  const storeProxy = new Proxy({} as ReturnType<ReplicaHandle["store"]>, {
+    get(_t, prop) {
+      const s = replica.store() as unknown as Record<string | symbol, unknown>;
+      const v = s[prop];
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(s) : v;
+    },
+  });
+  const agg = new Aggregator(buildProviders(config), disk, config, storeProxy, {
+    collect: false,
+    stateSource: (p) => replicaStateFor(replica, p),
+  });
+  const snapshots = new SnapshotStore(join(dataDir, "snapshots"));
+  return { config, router: buildReadRouter(agg, snapshots), replica, publishedDir, dataDir };
+}
+
+let current: Built;
 try {
   current = build(initial.config);
 } catch (e) {
-  log.error("refusing to start — corpus unavailable or schema not migrated", {
-    error: String(e instanceof Error ? e.message : e),
-  });
+  log.error("refusing to start", { error: String(e instanceof Error ? e.message : e) });
   process.exit(1);
 }
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "256kb" }));
 
-// self-hosted service, but sync/snapshot POSTs trigger real upstream work —
-// bound how fast anyone can make this machine fetch archives
-// (moved verbatim from index.ts)
-const expensive = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: true, legacyHeaders: false });
 const general = rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false });
-app.use("/api", (req, res, next) => (req.method === "POST" ? expensive(req, res, next) : general(req, res, next)));
+app.use("/api", general);
+
+function publicationMeta(): Record<string, unknown> | null {
+  const p = join(current.publishedDir, "publication.json");
+  if (!existsSync(p)) return null;
+  try {
+    return JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
 
 app.get("/healthz", (_req, res) => {
-  // SQLite availability + snapshot store reachability + trivially, latency
   const t0 = process.hrtime.bigint();
-  let sqliteOk = false;
-  let snapshotsOk = false;
+  let replicaOk = false;
   let counts: Record<string, number> = {};
-  try {
-    counts = current.store.counts();
-    sqliteOk = true;
-  } catch {
-    /* reported below */
+  if (current.replica.available()) {
+    try {
+      counts = current.replica.store().counts();
+      replicaOk = true;
+    } catch {
+      /* reported below */
+    }
   }
+  let snapshotsOk = false;
   try {
-    snapshotsOk = Array.isArray(new SnapshotStore(join(resolveDirs(current.config).dataDir, "snapshots")).list());
+    snapshotsOk = Array.isArray(new SnapshotStore(join(current.dataDir, "snapshots")).list());
   } catch {
     /* reported below */
   }
   const latencyMs = Number(process.hrtime.bigint() - t0) / 1e6;
-  res.status(sqliteOk ? 200 : 503).json({ service: "api", ok: sqliteOk, sqliteOk, snapshotsOk, latencyMs, counts });
+  res.status(replicaOk ? 200 : 503).json({
+    service: "api",
+    ok: replicaOk,
+    replicaOk,
+    snapshotsOk,
+    latencyMs,
+    counts,
+    publication: publicationMeta(),
+  });
 });
 
 app.get("/api/config", (_req, res) => {
@@ -113,42 +150,26 @@ app.get("/api/config", (_req, res) => {
 app.post("/api/reload", (_req, res) => {
   const next = loadConfig();
   if (!next.config) {
-    // fail closed on the reload, not the service: keep running on the last
-    // valid config and report exactly which fields are wrong
     res.status(400).json({ error: "config invalid; previous config retained", details: next.errors });
     return;
   }
-  current.store.close();
+  current.replica.close();
   current = build(next.config);
-  res.json({ ok: true, note: "config reloaded; unit state cleared" });
+  res.json({ ok: true, note: "config reloaded" });
 });
 
-// ---------------------------------------------------------------- proxy
-// The three control operations, forwarded to the collector's pod-internal
-// control surface. Paths are pinned; bodies pass through; nothing else is
-// forwardable. If the collector is down, the truthful answer is 503 —
-// reads keep working from the corpus.
-async function forward(req: express.Request, res: express.Response): Promise<void> {
-  try {
-    const upstream = await fetch(`${COLLECTOR_URL}/internal${req.path.replace(/^\/api/, "")}`, {
-      method: req.method,
-      headers: { "content-type": "application/json" },
-      body: req.method === "POST" ? JSON.stringify(req.body ?? {}) : undefined,
-    });
-    const body = await upstream.text();
-    res.status(upstream.status).type("application/json").send(body);
-  } catch {
-    res.status(503).json({ error: "collector unavailable — collection, enrichment and snapshot creation are handled by the collector service" });
-  }
-}
-app.post("/api/domains/:domain/units/:unit/sync", forward);
-app.get("/api/domains/:domain/units/:unit/packages/:name/enrich", forward);
-app.post("/api/snapshots", forward);
+// control operations are NOT part of this surface (invariant 10): honest
+// 405s so the web UI's buttons explain themselves instead of half-working
+const notHere = (what: string) => (_req: express.Request, res: express.Response) =>
+  res.status(405).json({
+    error: `${what} is an administrative operation, not an API route`,
+    how: "use the admin CLI against the collector control socket (see deploy/README.md), or let the scheduler run it on policy",
+  });
+app.post("/api/domains/:domain/units/:unit/sync", notHere("collection"));
+app.post("/api/snapshots", notHere("snapshot creation"));
 
 app.use("/api", (req, res, next) => current.router(req, res, next));
 
-// static frontend (moved verbatim from index.ts; on by default in the API
-// image — this IS the presentation service)
 if (process.env.TIDEPOOL_SERVE_STATIC !== "0") {
   const dist = process.env.TIDEPOOL_WEB_DIST || join(ROOT, "web", "dist");
   if (existsSync(dist)) {
@@ -159,12 +180,24 @@ if (process.env.TIDEPOOL_SERVE_STATIC !== "0") {
   }
 }
 
-const port = current.config.server.port ?? 8747;
-const server = app.listen(port, () => {
-  log.info("api listening", { port, root: ROOT });
-});
+// ------------------------------------------------------------- listener
+const { runDir } = resolveRuntimeDirs(current.config);
+const sockets = socketPaths(runDir);
+let server: ReturnType<typeof app.listen>;
+if ((process.env.TIDEPOOL_API_LISTEN ?? "").startsWith("unix")) {
+  const tighten = prepareSocket(sockets.api);
+  server = app.listen(sockets.api, () => {
+    tighten();
+    log.info("api listening on unix socket (fronted by proxy; --network=none capable)", { socket: sockets.api });
+  });
+} else {
+  const port = current.config.server.port ?? 8747;
+  server = app.listen(port, "127.0.0.1", () => {
+    log.info("api listening on loopback TCP (development mode)", { port });
+  });
+}
 
 onShutdown(log, async () => {
   await new Promise<void>((done) => server.close(() => done()));
-  current.store.close();
+  current.replica.close();
 });

@@ -1,0 +1,11 @@
+# deploy/quadlet/templates/tidepool-verify.service.in
+# Scheduled deployment verification: corpus integrity + boundary negative
+# tests. Non-zero exit marks the unit failed — visible in systemctl status.
+[Unit]
+Description=Tidepool deployment + boundary verification
+
+[Service]
+Type=oneshot
+ExecStart=@TIDEPOOL_HOME@/bin/verify.sh
+ExecStart=@TIDEPOOL_HOME@/bin/boundaries-verify.sh --json @TIDEPOOL_HOME@/exports/boundaries-latest.json
+Nice=10

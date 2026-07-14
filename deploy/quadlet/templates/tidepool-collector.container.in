@@ -1,0 +1,86 @@
+# deploy/quadlet/templates/tidepool-collector.container.in
+# Rendered by deploy/scripts/render.sh — do not install the template itself.
+#
+# The collector: the ONLY Tidepool process with Internet access, the ONLY
+# corpus writer, and the publisher of the read replica everything else
+# consumes. It has NO TCP listener of any kind — its control surface is a
+# Unix domain socket on the shared run/ mount, and no port is published.
+#
+# Privileges granted (each justified):
+#   corpus rw      — it IS the writer (writer db, objects, snapshots, exports)
+#   cache rw       — PRIVATE TTL cache (nothing else mounts this)
+#   published rw   — atomically publishes the read replica the API consumes
+#   run rw         — creates collector-control.sock
+#   config ro      — declared sources; immutable at runtime
+#   keyrings ro    — host-owned archive trust anchors for gpgv
+#   /tmp tmpfs     — gpgv scratch; noexec,nosuid
+#   network        — outbound HTTPS/DNS (host nftables narrows this further:
+#                    deploy/nftables/tidepool.nft is a REQUIRED layer on
+#                    hostile networks)
+
+[Unit]
+Description=Tidepool collector (sole Internet access; corpus writer; replica publisher)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Container]
+Image=@COLLECTOR_IMAGE@
+ContainerName=tidepool-collector
+
+# ------------------------------------------------------------- filesystem
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,size=64m
+Volume=@TIDEPOOL_HOME@/config:/var/lib/tidepool/config:ro
+Volume=@TIDEPOOL_HOME@/keyrings:/var/lib/tidepool/keyrings:ro
+Volume=@TIDEPOOL_HOME@/corpus:/var/lib/tidepool/corpus:rw
+Volume=@TIDEPOOL_HOME@/cache:/var/lib/tidepool/cache:rw
+Volume=@TIDEPOOL_HOME@/published:/var/lib/tidepool/published:rw
+Volume=@TIDEPOOL_HOME@/run:/var/lib/tidepool/run:rw
+# SELinux hosts: append :Z to Volume= lines (AppArmor hosts must NOT).
+
+# --------------------------------------------------------------- network
+# Default rootless network for OUTBOUND only — no PublishPort here, ever.
+# (boundaries-verify.sh asserts `podman port tidepool-collector` is empty.)
+
+# --------------------------------------------------------------- identity
+UserNS=keep-id:uid=10001,gid=10001
+
+# --------------------------------------------------------------- hardening
+DropCapability=all
+NoNewPrivileges=true
+PodmanArgs=--security-opt apparmor=tidepool-collector --pids-limit=256
+PodmanArgs=--memory=1g --cpus=2.0 --ulimit=nofile=4096:4096
+
+# ------------------------------------------------------------ environment
+# Paths are baked in the image; only provenance identity is set here.
+Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
+Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
+# Optional GitHub enrichment token — prefer a Podman secret over config:
+#   podman secret create tidepool-github-token -   (paste, ^D)
+# Secret=tidepool-github-token,type=env,target=TIDEPOOL_GITHUB_TOKEN
+
+# ------------------------------------------------------------ health check
+HealthCmd=node -e "require('http').request({socketPath:'/var/lib/tidepool/run/collector-control.sock',path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1)).end()"
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=20s
+HealthTimeout=5s
+
+# -------------------------------------------------------------- lifecycle
+# SIGTERM → drain in-flight observations (≤90s), finish a pending replica
+# publication, close the writer. TimeoutStopSec gives headroom over the
+# service's internal 110s deadline.
+StopTimeout=115
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+# Automatic pre-migration backup: uncomment to back up before every
+# (re)start — i.e. before any image update can migrate the schema.
+# ExecStartPre=@TIDEPOOL_HOME@/bin/backup.sh
+
+[Install]
+WantedBy=default.target

@@ -50,6 +50,19 @@ export interface AdvisoryRecordLite {
   fingerprint: string; // stable string of the advisory's diff-relevant content
 }
 
+/** Evidence (enrichment) record shape — deployment-evolution addition.
+ *  Enrichment results (OSV, GitHub releases, endoflife) are recorded as
+ *  observations like everything else; `payload` carries the normalized
+ *  evidence itself, `fingerprint` its diff-relevant digest. */
+export interface EvidenceRecordLite {
+  /** the package/entity the evidence is about */
+  subject: string;
+  /** stable evidence identity within the surface (e.g. OSV id, release tag) */
+  id: string;
+  fingerprint: string;
+  payload?: unknown;
+}
+
 function change(
   base: Pick<ChangeRecord, "domain" | "unit" | "sourceId" | "fromObservation" | "toObservation" | "detectedAt">,
   kind: ChangeKind,
@@ -82,7 +95,7 @@ export function detectChanges(
   next: Observation,
   prevRecords: unknown,
   nextRecords: unknown,
-  sourceKind: "index" | "advisory",
+  sourceKind: "index" | "advisory" | "evidence",
   coverageMode?: CoverageMode
 ): ChangeRecord[] {
   const base = {
@@ -148,6 +161,21 @@ export function detectChanges(
     }
     for (const [name, rec] of a) {
       if (!b.has(name)) out.push(change(base, "package-removed", { package: name, from: rec.version }));
+    }
+  } else if (sourceKind === "evidence") {
+    // evidence semantics: enrichment surfaces are always explicit-scope, so
+    // disappearance never claims withdrawal — only "no longer observed"
+    const a = new Map((prevRecords as EvidenceRecordLite[]).map((r) => [`${r.subject}\u0000${r.id}`, r]));
+    const b = new Map((nextRecords as EvidenceRecordLite[]).map((r) => [`${r.subject}\u0000${r.id}`, r]));
+    for (const [key, rec] of b) {
+      const old = a.get(key);
+      if (!old) out.push(change(base, "evidence-observed", { package: rec.subject, to: rec.id }));
+      else if (old.fingerprint !== rec.fingerprint)
+        out.push(change(base, "evidence-changed", { package: rec.subject, to: rec.id }));
+    }
+    for (const [, rec] of a) {
+      if (!b.has(`${rec.subject}\u0000${rec.id}`))
+        out.push(change(base, "evidence-no-longer-observed", { package: rec.subject, from: rec.id }));
     }
   } else {
     const a = new Map((prevRecords as AdvisoryRecordLite[]).map((r) => [`${r.package}\u0000${r.id}`, r]));

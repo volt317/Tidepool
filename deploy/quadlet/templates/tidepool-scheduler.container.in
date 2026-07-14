@@ -1,0 +1,49 @@
+# deploy/quadlet/templates/tidepool-scheduler.container.in
+# Rendered by deploy/scripts/render.sh — do not install the template itself.
+#
+# The scheduler: interval triggers over the collector control socket.
+# Network=none; its mount set is the config (ro) and run/ (rw) — no corpus,
+# no keyrings, no cache, no artifacts. Cadence lives in the validated
+# configuration (config.scheduler); this unit carries no behavior knobs.
+# Health = freshness of the heartbeat file it rewrites every 10s.
+
+[Unit]
+Description=Tidepool scheduler (config-driven triggers over Unix control socket)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Container]
+Image=@SCHEDULER_IMAGE@
+ContainerName=tidepool-scheduler
+
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,size=16m
+Volume=@TIDEPOOL_HOME@/config:/var/lib/tidepool/config:ro
+Volume=@TIDEPOOL_HOME@/run:/var/lib/tidepool/run:rw
+
+Network=none
+
+UserNS=keep-id:uid=10001,gid=10001
+DropCapability=all
+NoNewPrivileges=true
+PodmanArgs=--security-opt apparmor=tidepool-scheduler --pids-limit=64
+PodmanArgs=--memory=128m --cpus=0.25 --ulimit=nofile=512:512
+
+Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
+Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
+
+HealthCmd=node -e "const s=require('fs').statSync('/var/lib/tidepool/run/scheduler-heartbeat.json');process.exit(Date.now()-s.mtimeMs<60000?0:1)"
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=20s
+HealthTimeout=5s
+
+StopTimeout=15
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

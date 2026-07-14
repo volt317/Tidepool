@@ -48,6 +48,7 @@ profile tidepool-collector flags=(attach_disconnected,mediate_deleted) {
   network inet dgram,
   network inet6 dgram,
   network unix stream,
+  network unix stream,
   deny network raw,
   deny network packet,
 
@@ -69,6 +70,15 @@ profile tidepool-collector flags=(attach_disconnected,mediate_deleted) {
   # exports, and the TTL disk cache underneath corpus/cache.
   /var/lib/tidepool/corpus/ rw,
   /var/lib/tidepool/corpus/** rwk,
+  # private TTL cache (its own mount now — nothing else may see it)
+  /var/lib/tidepool/cache/ rw,
+  /var/lib/tidepool/cache/** rwk,
+  # atomically published read replica + publication metadata
+  /var/lib/tidepool/published/ rw,
+  /var/lib/tidepool/published/** rwk,
+  # runtime sockets: creates collector-control.sock
+  /var/lib/tidepool/run/ rw,
+  /var/lib/tidepool/run/** rwk,
 
   # gpgv scratch: lib/gpg.ts writes the InRelease body to a mkdtemp dir.
   # 'owner' restricts to files created by the service's own UID.

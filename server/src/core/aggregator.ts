@@ -26,6 +26,7 @@ import type {
 import type { DiskCache } from "../lib/util.js";
 import { debCompare } from "../lib/util.js";
 import { eolForSlug, githubReleases, osvForPackage, type EnrichRecordT } from "./enrich.js";
+import { digestOf } from "./inflow.js";
 import type { AdvisoryRecordLite, CoverageMode, IndexRecordLite } from "./inflow.js";
 import type { ObservationStore } from "./store.js";
 
@@ -64,7 +65,7 @@ export interface UnitProvider {
   syncAdvisories(): Promise<AdvisoryJoin>;
 }
 
-interface UnitState {
+export interface UnitState {
   status: "idle" | "syncing" | "ready" | "error";
   startedAt: number | null;
   finishedAt: number | null;
@@ -111,11 +112,20 @@ export class Aggregator {
   private disk: DiskCache;
   private config: TidepoolConfig;
   /** Whether this instance is allowed to perform upstream collection.
-   *  The API service runs with collect=false: sync() then answers only from
-   *  the shared disk cache (written by the collector) and NEVER fetches.
-   *  Deployment-split addition; defaults to true, so the single-process
-   *  development mode and all existing callers are unchanged. */
+   *  The API service runs with collect=false and NEVER fetches.
+   *  Defaults to true, so the single-process development mode and all
+   *  existing callers are unchanged. */
   private collect: boolean;
+  /** Deployment-evolution addition: a pluggable non-fetching state source.
+   *  When set, it — not the disk cache — answers reads for a non-collecting
+   *  instance: the API reconstructs state from the PUBLISHED SQLite replica,
+   *  returning the TTL cache to being private collector optimization. A
+   *  cache deletion can no longer change what the API serves. */
+  private stateSource: ((p: UnitProvider) => UnitState | null) | null;
+  /** Whether enrich() persists its results as evidence observations
+   *  (collector: true — interactive/live enrichment must never create an
+   *  unrecorded upstream query). */
+  private recordEvidence: boolean;
 
   readonly store: ObservationStore;
 
@@ -124,12 +134,14 @@ export class Aggregator {
     disk: DiskCache,
     config: TidepoolConfig,
     store: ObservationStore,
-    opts: { collect?: boolean } = {}
+    opts: { collect?: boolean; stateSource?: (p: UnitProvider) => UnitState | null; recordEvidence?: boolean } = {}
   ) {
     this.disk = disk;
     this.config = config;
     this.store = store;
     this.collect = opts.collect !== false;
+    this.stateSource = opts.stateSource ?? null;
+    this.recordEvidence = opts.recordEvidence ?? false;
     for (const p of providers) this.providers.set(key(p.domain, p.id), p);
   }
 
@@ -150,6 +162,8 @@ export class Aggregator {
   peek(p: UnitProvider): UnitState | null {
     const st = this.states.get(key(p.domain, p.id));
     if (st && st.status === "ready") return st;
+    // replica-backed instances never consult the collector-private cache
+    if (this.stateSource) return this.stateSource(p);
     const cached = this.disk.get<IndexCachePayload>(`index-${key(p.domain, p.id)}`, null);
     const cachedAdv = this.disk.get<AdvisoryCachePayload>(`advisories-${key(p.domain, p.id)}`, null);
     if (!cached) return null;
@@ -445,7 +459,56 @@ export class Aggregator {
     const payload: EnrichPayload = { package: row.name, records };
     // never pin a transient outage: all-error results are not cached
     if (records.some((r) => r.status !== "error")) this.disk.set(cacheKey, payload);
+    // deployment-evolution addition: enrichment IS collection — persist each
+    // surface's result as an immutable evidence observation so the API can
+    // serve it from published truth and snapshots can cover it
+    if (this.recordEvidence) this.recordEnrichment(p, row.name, records);
     return { payload, cached: false };
+  }
+
+  /** One evidence observation per enrichment surface per subject, with the
+   *  same append-only + change-detection treatment as every other source. */
+  private recordEnrichment(p: UnitProvider, subject: string, records: EnrichRecordT[]): void {
+    const collectedAt = Date.now();
+    for (const rec of records) {
+      // rec.id is already namespaced ("enrich:osv"…) — normalize to a single
+      // enrich:<surface>:<subject> source type
+      const surface = rec.id.startsWith("enrich:") ? rec.id.slice("enrich:".length) : rec.id;
+      const evidence = (rec.items ?? []).map((item) => {
+        const id = item.id ?? item.tag ?? item.cycle ?? "singleton";
+        return {
+          subject,
+          id: `${surface}:${id}`,
+          fingerprint: digestOf(item).slice(0, 32),
+          payload: item,
+        };
+      });
+      this.store.recordCollection({
+        domain: p.domain,
+        unitId: p.id,
+        unitKind: p.kind,
+        authority: rec.label,
+        sourceType: `enrich:${surface}:${subject}`,
+        canonicalUrl: rec.url || null,
+        scope: `enrichment of ${subject} via ${rec.label}`,
+        collectedAt,
+        status: rec.status === "error" ? "error" : "ok",
+        error: rec.error ?? null,
+        verification: null,
+        signedBy: [],
+        limitations: [
+          "explicit-scope enrichment: absence of evidence here is not evidence of absence",
+          ...(rec.more ? ["surface reported more results than were fetched"] : []),
+          ...(rec.note ? [rec.note] : []),
+        ],
+        rawArtifactDigest: null,
+        coverageMode: "explicit-scope",
+        parserVersion: p.parserVersion,
+        configVersion: p.configVersion,
+        recordKind: "evidence",
+        records: evidence,
+      });
+    }
   }
 }
 

@@ -264,6 +264,30 @@ export interface TidepoolConfig {
   };
   distros: DistroConfig[];
   ecosystems?: CodeUnitConfig[];
+  /** Deployment-evolution addition: scheduler cadence and maintenance
+   *  policy belong to the ONE validated configuration document, not to
+   *  environment variables (env stays for deployment wiring only). */
+  scheduler?: {
+    enabled?: boolean;
+    /** durations: "<n>h" | "<n>d" | "<n>m" (e.g. "6h", "7d") */
+    collectionInterval?: string;
+    snapshotInterval?: string;
+    verificationInterval?: string;
+    enrichmentInterval?: string;
+    snapshotStage?: SnapshotStage;
+    snapshotWindowHours?: number;
+  };
+  maintenance?: {
+    publishReplicaAfterCollection?: boolean;
+    enrichment?: {
+      /** enrich packages that changed during the latest window */
+      changedWindowHours?: number;
+      /** upper bound of packages enriched per policy run */
+      maxPerRun?: number;
+    };
+    backup?: { enabled?: boolean; retainVerified?: number };
+    retention?: { enabled?: boolean };
+  };
   enrichment?: {
     osv?: boolean;
     endoflife?: boolean;
@@ -319,7 +343,13 @@ export type ChangeKind =
   | "source-failure"
   | "source-recovery"
   | "verification-transition"
-  | "signer-transition";
+  | "signer-transition"
+  // evidence (enrichment) observations — deployment-evolution addition:
+  // enrichment results are first-class observations now, so their
+  // appearance/change/disappearance are first-class change kinds
+  | "evidence-observed"
+  | "evidence-changed"
+  | "evidence-no-longer-observed";
 
 /** A deterministic difference between two observations of the same source. */
 export interface ChangeRecord {

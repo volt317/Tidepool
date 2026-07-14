@@ -13,7 +13,7 @@
 # (Alternatively, on hosts with apparmor-utils: sudo aa-complain tidepool-collector)
 set -eu
 cd "$(dirname "$0")"
-for p in tidepool-collector tidepool-api tidepool-scheduler tidepool-dispatch; do
+for p in tidepool-collector tidepool-api tidepool-scheduler tidepool-proxy tidepool-dispatch tidepool-corpus-export tidepool-corpus-import; do
   sed 's/flags=(\(.*\))/flags=(\1,complain)/' "$p" > "$p.complain"
   echo "wrote $p.complain"
 done

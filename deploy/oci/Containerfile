@@ -25,14 +25,28 @@
 #   * images are immutable: all state lives on the /var/lib/tidepool mounts;
 #     containers run with a read-only root filesystem (enforced in Quadlet)
 #
-# Build (from the repository root):
-#   podman build -f deploy/oci/Containerfile --target collector -t localhost/tidepool-collector:latest .
-#   podman build -f deploy/oci/Containerfile --target api       -t localhost/tidepool-api:latest .
-#   podman build -f deploy/oci/Containerfile --target scheduler -t localhost/tidepool-scheduler:latest .
-#   podman build -f deploy/oci/Containerfile --target utility   -t localhost/tidepool-utility:latest .
+# Build (from the repository root — deploy/scripts/install.sh does this):
+#   BASE=$(deploy/scripts/pin-base.sh)                # digest-pinned base ref
+#   TAG="0.3.0-g$(git rev-parse --short HEAD)"        # immutable local tag
+#   podman build -f deploy/oci/Containerfile --target collector \
+#     --build-arg BASE_IMAGE="$BASE" \
+#     --build-arg TIDEPOOL_VERSION=0.3.0 --build-arg TIDEPOOL_GIT_COMMIT=$(git rev-parse HEAD) \
+#     -t localhost/tidepool-collector:$TAG .
+#   … and the same for api / scheduler / proxy / utility.
+#
+# IMAGE DISCIPLINE (isolated-appliance evolution):
+#   * BASE_IMAGE is an ARG so the base is pinned BY DIGEST at build time
+#     (pin-base.sh resolves the current digest; CI fails builds that used
+#     the floating tag). The default keeps ad-hoc developer builds working.
+#   * install.sh tags images 0.3.0-g<commit> — rendered Quadlets reference
+#     that immutable tag, never :latest.
+#   * provenance ARGs are baked as ENV so every snapshot manifest and
+#     replica publication records exactly which software produced it.
+
+ARG BASE_IMAGE=docker.io/library/node:22-bookworm-slim
 
 # --------------------------------------------------------------------- build
-FROM docker.io/library/node:22-bookworm-slim AS build
+FROM ${BASE_IMAGE} AS build
 WORKDIR /src
 
 # dependency layers first for cache efficiency
@@ -54,14 +68,22 @@ RUN npm run build \
 # No shell tooling is added; the base image of node:22-bookworm-slim does
 # contain /bin/sh (Debian), so interactive/shell execution is denied by the
 # AppArmor profiles and the containers never require one.
-FROM docker.io/library/node:22-bookworm-slim AS base
-ENV NODE_ENV=production \
+FROM ${BASE_IMAGE} AS base
+ARG TIDEPOOL_VERSION=""
+ARG TIDEPOOL_GIT_COMMIT=""
+ARG TIDEPOOL_IMAGE_DIGEST=""
+ENV TIDEPOOL_VERSION=${TIDEPOOL_VERSION} \
+    TIDEPOOL_GIT_COMMIT=${TIDEPOOL_GIT_COMMIT} \
+    TIDEPOOL_IMAGE_DIGEST=${TIDEPOOL_IMAGE_DIGEST} \
+    NODE_ENV=production \
     # canonical in-container layout, mirroring the host bind mounts 1:1 so
     # that AppArmor paths, documentation, and host paths all read the same
     TIDEPOOL_ROOT=/app \
     TIDEPOOL_CONFIG=/var/lib/tidepool/config/tidepool.config.json \
     TIDEPOOL_DATA_DIR=/var/lib/tidepool/corpus \
-    TIDEPOOL_CACHE_DIR=/var/lib/tidepool/corpus/cache \
+    TIDEPOOL_CACHE_DIR=/var/lib/tidepool/cache \
+    TIDEPOOL_PUBLISHED_DIR=/var/lib/tidepool/published \
+    TIDEPOOL_RUN_DIR=/var/lib/tidepool/run \
     NODE_OPTIONS=--disable-warning=ExperimentalWarning
 WORKDIR /app
 # fixed unprivileged identity; matches install.sh's chown of the bind mounts
@@ -89,10 +111,20 @@ CMD ["node", "server/dist/server/src/services/collector.js"]
 # ----------------------------------------------------------------------- api
 # Adds the built frontend; carries no gpgv and no keyrings.
 FROM base AS api
-ENV TIDEPOOL_WEB_DIST=/app/web/dist
+ENV TIDEPOOL_WEB_DIST=/app/web/dist \
+    TIDEPOOL_API_LISTEN=unix
 COPY --from=build /src/web/dist ./web/dist
-EXPOSE 8747
+# no EXPOSE: the deployed API listens on a Unix socket only; the proxy
+# image is the one with a TCP listener (dev TCP mode: unset TIDEPOOL_API_LISTEN)
 CMD ["node", "server/dist/server/src/services/api.js"]
+
+# -------------------------------------------------------------------- proxy
+# The only network-facing image: a ~150-line node:http TCP→UDS forwarder
+# with no corpus, snapshot, or config-content knowledge. This is what lets
+# the API container run with --network=none.
+FROM base AS proxy
+EXPOSE 8747
+CMD ["node", "server/dist/server/src/services/proxy.js"]
 
 # ------------------------------------------------------------------ scheduler
 # Base as-is: it owns no data and fetches nothing — it only dials the

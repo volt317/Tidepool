@@ -1,0 +1,73 @@
+# deploy/quadlet/templates/tidepool-api.container.in
+# Rendered by deploy/scripts/render.sh — do not install the template itself.
+#
+# The API: reads PUBLISHED truth, serves the local network THROUGH the proxy.
+#
+# The isolation claim, stated precisely (spec acceptance criterion 12 —
+# never claim more than is enforced):
+#   Network=none      → the container has NO network namespace connectivity:
+#                       "cannot contact the Internet" is structural, not
+#                       policy. Its listener is a Unix socket on run/.
+#   mount set         → the writer directory (corpus/writer) is NOT mounted;
+#                       a fully compromised API process has no path to the
+#                       authoritative database. corpus/objects and
+#                       corpus/snapshots are mounted read-only because state
+#                       reconstruction reads normalized record blobs and
+#                       finalized snapshots (documented "strictly required"
+#                       exception).
+#   AppArmor          → denies inet/inet6 sockets outright (enforceable here
+#                       because of Network=none), denies writer paths by
+#                       name, denies keyrings/cache, denies exec of anything
+#                       but node.
+
+[Unit]
+Description=Tidepool API (read-only over published replica; no network namespace)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Container]
+Image=@API_IMAGE@
+ContainerName=tidepool-api
+
+# ------------------------------------------------------------- filesystem
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,size=32m
+Volume=@TIDEPOOL_HOME@/config:/var/lib/tidepool/config:ro
+Volume=@TIDEPOOL_HOME@/published:/var/lib/tidepool/published:ro
+Volume=@TIDEPOOL_HOME@/corpus/objects:/var/lib/tidepool/corpus/objects:ro
+Volume=@TIDEPOOL_HOME@/corpus/snapshots:/var/lib/tidepool/corpus/snapshots:ro
+Volume=@TIDEPOOL_HOME@/run:/var/lib/tidepool/run:rw
+# NEVER mounted: corpus/writer (authoritative db), keyrings, cache.
+
+# --------------------------------------------------------------- network
+Network=none
+
+# --------------------------------------------------------------- identity
+UserNS=keep-id:uid=10001,gid=10001
+
+# --------------------------------------------------------------- hardening
+DropCapability=all
+NoNewPrivileges=true
+PodmanArgs=--security-opt apparmor=tidepool-api --pids-limit=128
+PodmanArgs=--memory=512m --cpus=1.0 --ulimit=nofile=2048:2048
+
+# ------------------------------------------------------------ environment
+Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
+Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
+
+# ------------------------------------------------------------ health check
+HealthCmd=node -e "require('http').request({socketPath:'/var/lib/tidepool/run/api.sock',path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1)).end()"
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=15s
+HealthTimeout=5s
+
+StopTimeout=25
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

@@ -36,7 +36,7 @@ else
 fi
 
 # -------------------------------------------------------- verify bind mounts
-for d in config corpus keyrings backups; do
+for d in config corpus keyrings backups published run cache; do
   [[ -d "$BASE/$d" ]] && pass "bind mounts: $BASE/$d exists" || fail "bind mounts: $BASE/$d missing"
 done
 [[ -f "$BASE/config/tidepool.config.json" ]] && pass "bind mounts: config file present" || fail "bind mounts: tidepool.config.json missing"
@@ -52,7 +52,7 @@ fi
 # ---------------------------------------------------------- verify apparmor
 if [[ -d /sys/kernel/security/apparmor ]]; then
   loaded="$(cat /sys/kernel/security/apparmor/profiles 2>/dev/null || sudo -n cat /sys/kernel/security/apparmor/profiles 2>/dev/null || true)"
-  for p in tidepool-collector tidepool-api tidepool-scheduler tidepool-dispatch; do
+  for p in tidepool-collector tidepool-api tidepool-scheduler tidepool-proxy tidepool-dispatch tidepool-corpus-export tidepool-corpus-import; do
     if grep -q "^$p " <<<"$loaded"; then
       pass "apparmor: $p loaded ($(grep "^$p " <<<"$loaded" | awk '{print $2}'))"
     else
@@ -65,34 +65,45 @@ fi
 
 # --------------------------------------------------------- verify deployment
 if systemctl --user is-active tidepool-collector.service >/dev/null 2>&1; then
-  for u in tidepool-collector tidepool-api tidepool-scheduler; do
+  for u in tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler; do
     systemctl --user is-active "$u.service" >/dev/null 2>&1 && pass "deployment: $u.service active" || fail "deployment: $u.service not active"
   done
-  for c in tidepool-collector tidepool-api tidepool-scheduler; do
+  for c in tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler; do
     h=$(podman inspect --format '{{.State.Health.Status}}' "$c" 2>/dev/null || echo "unknown")
     [[ "$h" == "healthy" || "$h" == "starting" ]] && pass "deployment: $c health=$h" || fail "deployment: $c health=$h"
   done
-  # API answers on its published loopback port
-  curl -fsS http://127.0.0.1:8747/healthz >/dev/null 2>&1 && pass "deployment: API /healthz reachable on published port" || fail "deployment: API /healthz not reachable"
-  # collector control surface must NOT be reachable from the host
-  if curl -fsS -m 2 http://127.0.0.1:8748/healthz >/dev/null 2>&1; then
-    fail "deployment: collector :8748 is reachable from the host — it must be pod-internal only"
+  # the PROXY answers on the single published port (through it: the API)
+  port="${LISTEN_PORT:-8747}"
+  curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && pass "deployment: proxy→api /healthz reachable on published port" || fail "deployment: proxy→api /healthz not reachable on :$port"
+  # the COLLECTOR must publish no port at all
+  cports="$(podman port tidepool-collector 2>/dev/null | wc -l)"
+  [[ "$cports" -eq 0 ]] && pass "deployment: collector publishes no TCP port" || fail "deployment: collector publishes $cports port(s) — it must publish none"
+  # publication metadata must exist and be coherent
+  if [[ -f "$BASE/published/publication.json" && -f "$BASE/published/tidepool-read.sqlite3" ]]; then
+    pdigest="$(python3 -c "import json;print(json.load(open('$BASE/published/publication.json'))['replicaDigest'])" 2>/dev/null || echo "")"
+    adigest="$(sha256sum "$BASE/published/tidepool-read.sqlite3" | cut -d' ' -f1)"
+    [[ -n "$pdigest" && "$pdigest" == "$adigest" ]] && pass "deployment: published replica digest matches publication.json" || fail "deployment: replica digest mismatch (metadata: ${pdigest:0:12}, file: ${adigest:0:12})"
   else
-    pass "deployment: collector control surface not exposed to the host"
+    fail "deployment: no published replica — the API has nothing to serve"
   fi
 else
-  skip "deployment: services not running (start with: systemctl --user start tidepool-pod)"
+  skip "deployment: services not running (systemctl --user start tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler)"
 fi
 
 # ------------------------------------------- verify sqlite / corpus / snapshots
 # All three run inside an ad-hoc utility container against the real corpus,
 # through a query-only connection — verification can never mutate evidence.
-if podman image exists localhost/tidepool-utility:latest 2>/dev/null && [[ -f "$BASE/corpus/tidepool.sqlite3" ]]; then
+if [[ -d /sys/kernel/security/apparmor ]] && grep -q "^tidepool-corpus-export " /sys/kernel/security/apparmor/profiles 2>/dev/null; then
+  APPARMOR_VERIFY_OPT="--security-opt apparmor=tidepool-corpus-export"
+fi
+# shellcheck disable=SC2086
+UTILITY="$(podman images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' 2>/dev/null | grep '^localhost/tidepool-utility:' | sort -k2 -r | head -1 | cut -d' ' -f1)"
+if [[ -n "$UTILITY" && -f "$BASE/corpus/writer/tidepool.sqlite3" ]]; then
   out=$(podman run --rm --network=none \
-      $( [[ -d /sys/kernel/security/apparmor ]] && echo "--security-opt apparmor=tidepool-dispatch" ) \
+      ${APPARMOR_VERIFY_OPT:-} \
       -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
       --userns=keep-id:uid=10001,gid=10001 \
-      localhost/tidepool-utility node --input-type=module -e '
+      "$UTILITY" node --input-type=module -e '
         const { SqliteObservationStore } = await import("/app/server/dist/server/src/core/store.js");
         const { SnapshotStore } = await import("/app/server/dist/server/src/core/snapshot.js");
         const s = new SqliteObservationStore("/var/lib/tidepool/corpus", undefined, { readOnly: true });

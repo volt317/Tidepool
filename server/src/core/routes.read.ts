@@ -78,6 +78,44 @@ export function buildReadRouter(agg: Aggregator, snapshots: SnapshotStore): Rout
     }
   });
 
+  // ---------------------------------------------------- stored evidence
+  // Enrichment served from PUBLISHED truth only (deployment-evolution):
+  // this route never causes an upstream query. In the composed development
+  // router the control router's live-enrich handler registers first and
+  // wins; in the API service only this stored view exists.
+  r.get("/domains/:domain/units/:unit/packages/:name/enrich", (req, res) => {
+    const p = agg.provider(req.params.domain, req.params.unit);
+    if (!p) {
+      res.status(404).json({ error: "unknown unit" });
+      return;
+    }
+    try {
+      const evidence = agg.store.evidenceFor(p.domain, p.id, req.params.name);
+      const records = evidence.map((e) => {
+        const first = e.records[0] as { payload?: unknown } | undefined;
+        const surface = e.sourceType.split(":")[1] ?? e.sourceType;
+        return {
+          id: surface,
+          label: `${surface} (stored evidence, observed ${e.observedAt})`,
+          url: "",
+          status: e.records.length > 0 ? "ok" : "empty",
+          items: e.records.map((r2) => (r2 as { payload?: unknown }).payload ?? r2),
+          count: e.records.length,
+          note: first ? undefined : "no items in latest observation",
+        };
+      });
+      res.json({
+        package: req.params.name,
+        records,
+        cached: true,
+        stored: true,
+        note: records.length === 0 ? "no stored enrichment evidence for this package — enrichment runs on collector policy or via the admin CLI" : undefined,
+      });
+    } catch (e) {
+      res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+    }
+  });
+
   // ------------------------------------------------------------ inflow
 
   r.get("/domains/:domain/units/:unit/observations", (req, res) => {

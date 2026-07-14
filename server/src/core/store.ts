@@ -25,13 +25,14 @@ import type {
   SnapshotSourceCoverage,
   Verification,
 } from "../../../shared/types.js";
-import { iso, fromIso, openDatabase, openDatabaseQueryOnly, sqliteModule, type OpenedDb, type SqliteDatabase } from "./db.js";
+import { iso, fromIso, openDatabase, openDatabaseQueryOnly, openReplica, sqliteModule, type OpenedDb, type SqliteDatabase } from "./db.js";
 import {
   detectChanges,
   digestOf,
   stableStringify,
   type AdvisoryRecordLite,
   type CoverageMode,
+  type EvidenceRecordLite,
   type IndexRecordLite,
 } from "./inflow.js";
 import { newestOf } from "../lib/versions.js";
@@ -62,8 +63,8 @@ export interface CollectionInput {
   coverageMode: CoverageMode;
   parserVersion: string;
   configVersion: string;
-  recordKind: "index" | "advisory";
-  records: IndexRecordLite[] | AdvisoryRecordLite[];
+  recordKind: "index" | "advisory" | "evidence";
+  records: IndexRecordLite[] | AdvisoryRecordLite[] | EvidenceRecordLite[];
 }
 
 export interface AppendResult {
@@ -110,6 +111,8 @@ export interface ObservationStore {
   sourceHead(sourceId: string): SourceHead | null;
   verifyCorpus(): CorpusVerification;
   counts(): Record<string, number>;
+  /** stored enrichment evidence for a subject (deployment-evolution) */
+  evidenceFor(domain: string, unitId: string, subject: string): { sourceType: string; observedAt: string; records: unknown[] }[];
 }
 
 export interface HistoricalSourceState {
@@ -143,8 +146,8 @@ export interface ReconstructedSource {
   sourceType: string;
   coverage: SnapshotSourceCoverage;
   observation: Observation | null;
-  recordKind: "index" | "advisory";
-  records: IndexRecordLite[] | AdvisoryRecordLite[];
+  recordKind: "index" | "advisory" | "evidence";
+  records: IndexRecordLite[] | AdvisoryRecordLite[] | EvidenceRecordLite[];
 }
 
 const objectPath = (root: string, digest: string): string => join(root, "objects", "sha256", digest.slice(0, 2), digest);
@@ -154,8 +157,18 @@ export class SqliteObservationStore implements ObservationStore {
   readonly opened: OpenedDb;
   private db: SqliteDatabase;
 
-  constructor(dataDir: string, migrationsDir?: string, opts: { readOnly?: boolean } = {}) {
+  constructor(dataDir: string, migrationsDir?: string, opts: { readOnly?: boolean; replicaFile?: string } = {}) {
     this.dataDir = dataDir;
+    if (opts.replicaFile) {
+      // Deployment-evolution addition: read PUBLISHED truth. The connection
+      // is SQLITE_OPEN_READONLY against an atomically published single-file
+      // replica; dataDir supplies read-only sibling trees (objects/,
+      // snapshots/) mounted separately — the writer/ path is never present
+      // in this process's mount namespace at all.
+      this.opened = openReplica(opts.replicaFile, migrationsDir);
+      this.db = this.opened.db;
+      return;
+    }
     if (opts.readOnly) {
       // Deployment-split addition: the API service opens the SAME corpus but
       // through a query_only connection — SQLite rejects every write on it,
@@ -358,7 +371,7 @@ export class SqliteObservationStore implements ObservationStore {
     const obs = this.rowToObservation(row);
     const meta = row.metadata_json ? (parseJsonCorpus(String(row.metadata_json), "obs meta") as { recordKind?: string; unitKind?: string }) : {};
     const cov = row.coverage_json ? (parseJsonCorpus(String(row.coverage_json), "obs coverage") as { mode?: CoverageMode }) : {};
-    const kind = meta.recordKind === "advisory" ? "advisory" : "index";
+    const kind = meta.recordKind === "advisory" ? "advisory" : meta.recordKind === "evidence" ? "evidence" : "index";
 
     try {
       const prev = this.previousObservation(dbSourceId, obs.collectedAt);
@@ -443,7 +456,7 @@ export class SqliteObservationStore implements ObservationStore {
     const now = iso(inp.collectedAt);
     let n = 0;
     for (const r of records) {
-      const name = "name" in r ? r.name : r.package;
+      const name = "name" in r ? r.name : "package" in r ? r.package : r.subject;
       const identity = this.entityIdentity(inp, name);
       const entityId = this.entityIdFor(inp, name);
       upsertEntity.run(entityId, identity.domain, identity.ecosystem, identity.entityType, identity.canonicalName, identity.namespace, identity.architecture, stableStringify(identity), now, now);
@@ -637,9 +650,19 @@ export class SqliteObservationStore implements ObservationStore {
       const kindMeta = (lastSuccessful ?? atBoundary)
         ? (this.db.prepare("SELECT metadata_json FROM observations WHERE id = ?").get((lastSuccessful ?? atBoundary)!.id))
         : null;
-      const recordKind = kindMeta?.metadata_json
-        ? ((parseJsonCorpus(String(kindMeta.metadata_json), "obs meta") as { recordKind?: string }).recordKind === "advisory" ? "advisory" : "index")
-        : String(s2.source_type).startsWith("advisories:") ? "advisory" : "index";
+      const metaKind = kindMeta?.metadata_json
+        ? (parseJsonCorpus(String(kindMeta.metadata_json), "obs meta") as { recordKind?: string }).recordKind
+        : undefined;
+      const recordKind: "index" | "advisory" | "evidence" =
+        metaKind === "advisory" || metaKind === "evidence"
+          ? metaKind
+          : metaKind === "index"
+            ? "index"
+            : String(s2.source_type).startsWith("advisories:")
+              ? "advisory"
+              : String(s2.source_type).startsWith("enrich:")
+                ? "evidence"
+                : "index";
       out.push({
         sourceType: String(s2.source_type),
         coverage: {
@@ -681,9 +704,10 @@ export class SqliteObservationStore implements ObservationStore {
           v[suffix] = r.version;
           versionsByName.set(r.name, v);
         }
-      } else {
+      } else if (src.recordKind === "advisory") {
         for (const r of src.records as AdvisoryRecordLite[]) advisoriesByName.set(r.package, (advisoriesByName.get(r.package) ?? 0) + 1);
       }
+      // evidence sources contribute to coverage, never to package/advisory state
     }
     const entities: SnapshotEntity[] = [];
     for (const [name, versions] of [...versionsByName].sort((a, b) => a[0].localeCompare(b[0]))) {
@@ -724,16 +748,20 @@ export class SqliteObservationStore implements ObservationStore {
     changes: { id: string }[];
     findings: { ruleId: string; title: string; summary: string; confidence: number; confidenceBasis: string; severityHint: string; evidence: unknown; ambiguities: string[] }[];
     bundlePath: string | null;
+    /** deployment-evolution addition: the exact software/config identity
+     *  that produced this snapshot (version, commit, image digest, schema,
+     *  config digest, rule versions, profile/unit digests) */
+    provenance?: Record<string, unknown> | null;
   }): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
         .prepare(
           `INSERT INTO snapshots (id, schema_version, window_start, window_end, created_at, scope_json, truth_boundary_json, content_digest, bundle_path, metadata_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO NOTHING`
         )
-        .run(doc.digest, STORE_SCHEMA_VERSION, iso(doc.window.from), iso(doc.window.to), iso(doc.createdAt), stableStringify(doc.scope), stableStringify({ notObserved: doc.notObserved, ambiguities: doc.ambiguities }), doc.digest, doc.bundlePath);
+        .run(doc.digest, STORE_SCHEMA_VERSION, iso(doc.window.from), iso(doc.window.to), iso(doc.createdAt), stableStringify(doc.scope), stableStringify({ notObserved: doc.notObserved, ambiguities: doc.ambiguities }), doc.digest, doc.bundlePath, doc.provenance ? stableStringify(doc.provenance) : null);
       const so = this.db.prepare("INSERT INTO snapshot_observations (snapshot_id, observation_id) VALUES (?, ?) ON CONFLICT DO NOTHING");
       for (const o of doc.observations) so.run(doc.digest, o.id);
       const sc = this.db.prepare("INSERT INTO snapshot_changes (snapshot_id, change_id) VALUES (?, ?) ON CONFLICT DO NOTHING");
@@ -795,6 +823,37 @@ export class SqliteObservationStore implements ObservationStore {
     return out;
   }
 
+  /** Reachability inputs for snapshot-aware retention (deployment-evolution):
+   *  digests protected by any snapshot's truth boundary (normalized + raw)
+   *  and by every source's latest observation (current state). */
+  retentionReachability(): { bySnapshots: Set<string>; byHeads: Set<string> } {
+    const snapshotIds = this.db.prepare("SELECT id FROM snapshots").all().map((r) => String(r.id));
+    const bySnapshots = this.normalizedDigestsForSnapshots(snapshotIds);
+    const q = this.db.prepare(
+      `SELECT DISTINCT o.artifact_digest AS d FROM snapshot_observations so
+         JOIN observations o ON o.id = so.observation_id
+       WHERE so.snapshot_id = ? AND o.artifact_digest IS NOT NULL`
+    );
+    for (const id of snapshotIds) for (const r of q.all(id)) bySnapshots.add(String(r.d));
+    const byHeads = new Set<string>();
+    for (const r of this.db
+      .prepare(
+        `SELECT o.normalized_digest AS nd, o.artifact_digest AS ad FROM observations o
+         WHERE o.id IN (SELECT id FROM observations o2 WHERE o2.source_id = o.source_id ORDER BY o2.collected_at DESC, o2.id DESC LIMIT 1)`
+      )
+      .all()) {
+      if (r.nd) byHeads.add(String(r.nd));
+      if (r.ad) byHeads.add(String(r.ad));
+    }
+    return { bySnapshots, byHeads };
+  }
+
+  /** Record that a pruned artifact's bytes are no longer held — provenance
+   *  rows are durable and never deleted. */
+  markArtifactPruned(digest: string): void {
+    this.db.prepare("UPDATE artifacts SET storage_path = NULL WHERE digest = ?").run(digest);
+  }
+
   /** heads are a current-state optimization — rebuild them from observations */
   recomputeSourceHeads(): void {
     const latest = this.db
@@ -823,6 +882,104 @@ export class SqliteObservationStore implements ObservationStore {
     );
     for (const r of latest)
       up.run(String(r.source_id), String(r.id), String(r.collected_at), r.normalized_digest as string | null, String(r.status), success.get(String(r.source_id)) ?? null);
+  }
+
+  // ------------------------------------------------------------ publication
+
+  /**
+   * Publish an atomically replaced, consistent READ REPLICA of the
+   * authoritative database (deployment-evolution addition).
+   *
+   * Flow: SQLite backup API → temporary file in the publish directory →
+   * PRAGMA integrity_check on the temporary copy → content digest →
+   * atomic rename over published/tidepool-read.sqlite3 → metadata written
+   * (write-then-rename) describing exactly what was published.
+   *
+   * The replica IS the canonical consistent image of the authoritative
+   * database at this moment, so its digest serves as the authoritative
+   * content digest (a live WAL database has no single well-defined file
+   * digest — this is stated rather than papered over).
+   */
+  async publishReplica(publishDir: string, provenance: Record<string, unknown> = {}): Promise<{ file: string; digest: string }> {
+    mkdirSync(publishDir, { recursive: true });
+    const tmp = join(publishDir, `.publishing-${process.pid}-${Date.now()}.sqlite3`);
+    const finalFile = join(publishDir, "tidepool-read.sqlite3");
+    try {
+      await this.backupDatabaseTo(tmp);
+      // verify the copy before anyone can observe it
+      const { DatabaseSync } = sqliteModule();
+      const check = new DatabaseSync(tmp, { readOnly: true });
+      try {
+        const integ = check.prepare("PRAGMA integrity_check").get();
+        if (String(integ?.integrity_check) !== "ok") throw new Error(`replica failed integrity_check: ${String(integ?.integrity_check)}`);
+      } finally {
+        check.close();
+      }
+      const bytes = readCorpus(tmp);
+      const digest = sha256hex(bytes);
+      renameSync(tmp, finalFile); // atomic on one filesystem
+      const latestObs = this.db
+        .prepare("SELECT id, collected_at FROM observations ORDER BY collected_at DESC, id DESC LIMIT 1")
+        .get();
+      const latestAnalyzed = this.db
+        .prepare("SELECT id, collected_at FROM observations WHERE analysis_status = 'analyzed' ORDER BY collected_at DESC, id DESC LIMIT 1")
+        .get();
+      const meta = {
+        publishedAt: iso(Date.now()),
+        replicaFile: "tidepool-read.sqlite3",
+        replicaDigest: digest,
+        authoritativeContentDigest: digest, // by construction — see docstring
+        replicaBytes: bytes.length,
+        storeSchemaVersion: STORE_SCHEMA_VERSION,
+        migrations: this.opened.migrations.map(([v, d]) => `${v}:${d.slice(0, 12)}`),
+        latestObservation: latestObs ? { id: String(latestObs.id), collectedAt: String(latestObs.collected_at) } : null,
+        latestAnalyzedObservation: latestAnalyzed ? { id: String(latestAnalyzed.id), collectedAt: String(latestAnalyzed.collected_at) } : null,
+        counts: this.counts(),
+        generator: provenance,
+      };
+      const metaTmp = join(publishDir, ".publication.json.tmp");
+      writeFileSync(metaTmp, JSON.stringify(meta, null, 2));
+      renameSync(metaTmp, join(publishDir, "publication.json"));
+      return { file: finalFile, digest };
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
+    }
+  }
+
+  // -------------------------------------------------------------- evidence
+
+  /** Latest recorded enrichment evidence for a subject in a unit: one entry
+   *  per enrich:* source, each carrying the normalized evidence records the
+   *  collector persisted (deployment-evolution addition — the API serves
+   *  stored evidence and NEVER causes an upstream query). */
+  evidenceFor(domain: string, unitId: string, subject: string): { sourceType: string; observedAt: string; records: unknown[] }[] {
+    const srcs = this.db
+      .prepare("SELECT id, source_type FROM sources WHERE domain = ? AND unit_id = ? AND source_type LIKE 'enrich:%' ORDER BY source_type")
+      .all(domain, unitId);
+    const out: { sourceType: string; observedAt: string; records: unknown[] }[] = [];
+    const wanted = `:${subject}`;
+    for (const s2 of srcs) {
+      const t = String(s2.source_type);
+      if (!t.endsWith(wanted)) continue;
+      const { lastSuccessful, records } = this.sourceStateAt(String(s2.id), Date.now());
+      if (!lastSuccessful) continue;
+      out.push({ sourceType: t, observedAt: iso(lastSuccessful.collectedAt), records });
+    }
+    return out;
+  }
+
+  /** Subjects that already carry enrichment evidence in a unit. */
+  enrichedSubjects(domain: string, unitId: string): Set<string> {
+    const srcs = this.db
+      .prepare("SELECT source_type FROM sources WHERE domain = ? AND unit_id = ? AND source_type LIKE 'enrich:%'")
+      .all(domain, unitId);
+    const out = new Set<string>();
+    for (const s2 of srcs) {
+      const parts = String(s2.source_type).split(":");
+      if (parts.length >= 3) out.add(parts.slice(2).join(":"));
+    }
+    return out;
   }
 
   // -------------------------------------------------------------- integrity

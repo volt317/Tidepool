@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Tidepool deployment verification
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

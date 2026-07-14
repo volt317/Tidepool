@@ -1,91 +1,124 @@
 #!/usr/bin/env bash
-# deploy/scripts/install.sh
+# deploy/scripts/install.sh — build and install the isolated-appliance
+# deployment: independent rootless containers, digest-pinned base, immutable
+# image tags, rendered Quadlet units, AppArmor profiles, timers.
 #
-# One-shot installer for the rootless Tidepool appliance. Idempotent: safe
-# to re-run after pulling a new release (it rebuilds images and re-installs
-# units; the corpus and config are never touched once they exist).
+#   TIDEPOOL_HOME   data root (default ~/.local/share/tidepool)
+#   LISTEN_ADDR     proxy bind address (default 127.0.0.1 — set a trusted
+#                   LAN address ONLY deliberately)
+#   LISTEN_PORT     proxy port (default 8747)
 #
-#   ./deploy/scripts/install.sh                # everything except AppArmor
-#   sudo ./deploy/scripts/install.sh apparmor  # kernel profile load (root)
-#
-# What it sets up (host side):
-#   ~/.local/share/tidepool/config/    tidepool.config.json (seeded once)
-#   ~/.local/share/tidepool/keyrings/  distro archive keyrings (copied ro)
-#   ~/.local/share/tidepool/corpus/    durable evidence (created empty)
-#   ~/.local/share/tidepool/backups/   corpus backups
-#   ~/.local/share/tidepool/bin/       backup.sh for ExecStartPre use
-#   ~/.config/containers/systemd/      Quadlet units
+# What this script does NOT do (deliberately):
+#   * load AppArmor profiles (needs root — prints the exact commands)
+#   * install nftables rules (site-specific — prints where they are)
+#   * start services (operators review rendered units first)
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")/../.." && pwd)"
-BASE="${TIDEPOOL_HOME:-$HOME/.local/share/tidepool}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+TIDEPOOL_HOME="${TIDEPOOL_HOME:-$HOME/.local/share/tidepool}"
+LISTEN_ADDR="${LISTEN_ADDR:-127.0.0.1}"
+LISTEN_PORT="${LISTEN_PORT:-8747}"
 QUADLET_DIR="$HOME/.config/containers/systemd"
+TIMER_DIR="$HOME/.config/systemd/user"
 
-# ---------------------------------------------------------------- apparmor
-# Root-only step, deliberately separate: rootless containers can be CONFINED
-# by AppArmor, but only root can LOAD profiles into the kernel.
-if [[ "${1:-}" == "apparmor" ]]; then
-  [[ $EUID -eq 0 ]] || { echo "apparmor step must run as root"; exit 1; }
-  for p in tidepool-collector tidepool-api tidepool-scheduler tidepool-dispatch; do
-    install -m 644 "$REPO/deploy/apparmor/$p" "/etc/apparmor.d/$p"
-    apparmor_parser -r "/etc/apparmor.d/$p"
-    echo "loaded AppArmor profile: $p"
-  done
-  exit 0
-fi
-
-[[ $EUID -ne 0 ]] || { echo "run the main install as your rootless user (only the 'apparmor' step is root)"; exit 1; }
 command -v podman >/dev/null || { echo "podman is required"; exit 1; }
-
-echo "==> host layout under $BASE"
-mkdir -p "$BASE"/{config,keyrings,corpus,backups,bin}
-chmod 700 "$BASE" "$BASE/corpus" "$BASE/backups"
-chmod 755 "$BASE/config" "$BASE/keyrings"
-
-# seed config exactly once — it is the operator's document from then on
-if [[ ! -f "$BASE/config/tidepool.config.json" ]]; then
-  install -m 644 "$REPO/tidepool.config.json" "$BASE/config/tidepool.config.json"
-  echo "    seeded config (edit $BASE/config/tidepool.config.json, then: systemctl --user restart tidepool-api)"
+command -v git >/dev/null || { echo "git is required (image tags embed the commit)"; exit 1; }
+if [[ $EUID -eq 0 ]]; then
+  echo "run as the unprivileged appliance user, not root (rootless deployment)"; exit 1
 fi
 
-# copy whichever configured archive keyrings exist on this host; the
-# collector validates availability at startup and fails closed per-distro
-echo "==> keyrings"
-copied=0
-for k in /usr/share/keyrings/ubuntu-archive-keyring.gpg \
-         /usr/share/keyrings/debian-archive-keyring.gpg \
-         /usr/share/keyrings/debian-archive-bookworm-stable.gpg \
-         /usr/share/keyrings/debian-archive-bookworm-automatic.gpg \
-         /usr/share/keyrings/debian-archive-bookworm-security-automatic.gpg; do
-  [[ -f "$k" ]] && install -m 444 "$k" "$BASE/keyrings/$(basename "$k")" && copied=$((copied+1))
+VERSION="$(node -e "console.log(require('$REPO/package.json').version)" 2>/dev/null || echo 0.3.0)"
+COMMIT="$(git -C "$REPO" rev-parse --short HEAD)"
+COMMIT_FULL="$(git -C "$REPO" rev-parse HEAD)"
+IMAGE_TAG="${VERSION}-g${COMMIT}"
+
+echo "== Tidepool isolated-appliance install =="
+echo "   data root : $TIDEPOOL_HOME"
+echo "   image tag : $IMAGE_TAG (immutable; no :latest anywhere)"
+echo "   listener  : $LISTEN_ADDR:$LISTEN_PORT (proxy; the only published port)"
+
+# ---------------------------------------------------------------- data trees
+# Per-service mount matrix (the enforcement, in directory form):
+#   collector: config ro, keyrings ro, corpus rw, cache rw, published rw, run rw
+#   api:       config ro, published ro, corpus/objects ro, corpus/snapshots ro, run rw
+#   scheduler: config ro, run rw
+#   proxy:     config ro, run rw
+mkdir -p "$TIDEPOOL_HOME"/{config,keyrings,corpus,corpus/objects,corpus/snapshots,cache,published,run,backups,exports,bin}
+chmod 700 "$TIDEPOOL_HOME" "$TIDEPOOL_HOME"/{keyrings,corpus,cache,run,backups}
+chmod 755 "$TIDEPOOL_HOME"/{published,exports}
+
+if [ ! -f "$TIDEPOOL_HOME/config/tidepool.config.json" ]; then
+  install -m 640 "$REPO/tidepool.config.json" "$TIDEPOOL_HOME/config/tidepool.config.json"
+  echo "   config    : seeded from repository default — EDIT IT before first start"
+fi
+
+# --------------------------------------------------------------------- build
+BASE_IMAGE="$("$HERE/pin-base.sh")"
+echo "   base image: $BASE_IMAGE (digest-pinned)"
+for target in collector api scheduler proxy utility; do
+  echo "-- building tidepool-$target:$IMAGE_TAG"
+  podman build -q -f "$REPO/deploy/oci/Containerfile" --target "$target" \
+    --build-arg BASE_IMAGE="$BASE_IMAGE" \
+    --build-arg TIDEPOOL_VERSION="$VERSION" \
+    --build-arg TIDEPOOL_GIT_COMMIT="$COMMIT_FULL" \
+    -t "localhost/tidepool-$target:$IMAGE_TAG" "$REPO"
 done
-echo "    $copied keyring(s) staged (install ubuntu-keyring / debian-archive-keyring for more,"
-echo "    then point config .index.keyrings at /var/lib/tidepool/keyrings/<file>)"
 
-echo "==> building images (this compiles the release inside the build stage)"
-for target in collector api scheduler utility; do
-  podman build -q -f "$REPO/deploy/oci/Containerfile" --target "$target" -t "localhost/tidepool-$target:latest" "$REPO"
-  echo "    localhost/tidepool-$target:latest"
-done
+# record final image digests: the identity that snapshot provenance names
+digest_manifest="$TIDEPOOL_HOME/exports/image-digests-$IMAGE_TAG.json"
+{
+  echo "{"
+  first=1
+  for target in collector api scheduler proxy utility; do
+    d="$(podman image inspect --format '{{.Digest}}' "localhost/tidepool-$target:$IMAGE_TAG")"
+    [ $first -eq 1 ] || echo ","
+    first=0
+    printf '  "tidepool-%s": "%s"' "$target" "$d"
+  done
+  echo ""
+  echo "}"
+} > "$digest_manifest"
+echo "   digests   : $digest_manifest"
 
-echo "==> backup helper (used manually and by the optional ExecStartPre)"
-install -m 755 "$REPO/deploy/scripts/backup.sh" "$BASE/bin/backup.sh"
+# ------------------------------------------------------------------- render
+OUT_DIR="$REPO/deploy/quadlet/rendered" TIDEPOOL_HOME="$TIDEPOOL_HOME" \
+  IMAGE_TAG="$IMAGE_TAG" LISTEN_ADDR="$LISTEN_ADDR" LISTEN_PORT="$LISTEN_PORT" \
+  "$HERE/render.sh"
 
-echo "==> quadlet units"
-mkdir -p "$QUADLET_DIR"
-install -m 644 "$REPO"/deploy/quadlet/tidepool.pod "$QUADLET_DIR/"
-install -m 644 "$REPO"/deploy/quadlet/tidepool-collector.container "$QUADLET_DIR/"
-install -m 644 "$REPO"/deploy/quadlet/tidepool-api.container "$QUADLET_DIR/"
-install -m 644 "$REPO"/deploy/quadlet/tidepool-scheduler.container "$QUADLET_DIR/"
+mkdir -p "$QUADLET_DIR" "$TIMER_DIR"
+install -m 644 "$REPO"/deploy/quadlet/rendered/*.container "$QUADLET_DIR/"
+install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-backup.service "$TIMER_DIR/" 2>/dev/null || true
+install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-backup.timer "$TIMER_DIR/" 2>/dev/null || true
+install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-verify.service "$TIMER_DIR/" 2>/dev/null || true
+install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-verify.timer "$TIMER_DIR/" 2>/dev/null || true
+
+# operator tooling next to the data
+install -m 755 "$HERE"/backup.sh "$HERE"/restore.sh "$HERE"/verify.sh "$HERE"/boundaries-verify.sh "$TIDEPOOL_HOME/bin/"
+
 systemctl --user daemon-reload
 
-cat <<EOF
+cat <<NEXT
 
-Done. Next steps:
-  1. sudo $REPO/deploy/scripts/install.sh apparmor     # load kernel profiles
-  2. Edit $BASE/config/tidepool.config.json
-     (keyring paths become /var/lib/tidepool/keyrings/<file> inside the pod)
-  3. systemctl --user start tidepool-pod
-  4. loginctl enable-linger \$USER                      # survive logout/boot
-  5. $REPO/deploy/scripts/verify.sh                    # validate everything
-EOF
+== install complete — remaining ROOT steps (printed, not performed) ==
+
+1. AppArmor profiles (all seven; complain-mode first if you prefer):
+     sudo install -m 644 $REPO/deploy/apparmor/tidepool-{collector,api,scheduler,proxy,dispatch,corpus-export,corpus-import} /etc/apparmor.d/
+     sudo apparmor_parser -r /etc/apparmor.d/tidepool-*
+
+2. Host firewall (REQUIRED on hostile networks — edit the three defines):
+     \$EDITOR $REPO/deploy/nftables/tidepool.nft
+     sudo nft -f $REPO/deploy/nftables/tidepool.nft
+
+3. Keyrings: copy the archive keyrings your config references into
+     $TIDEPOOL_HOME/keyrings/
+
+4. Review, then start (independent services — no pod):
+     systemctl --user start tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler
+     systemctl --user enable tidepool-backup.timer tidepool-verify.timer
+     loginctl enable-linger \$USER   # survive logout
+
+5. Verify the deployment AND its boundaries:
+     $TIDEPOOL_HOME/bin/verify.sh
+     $TIDEPOOL_HOME/bin/boundaries-verify.sh
+NEXT

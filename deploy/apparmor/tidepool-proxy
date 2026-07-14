@@ -1,0 +1,79 @@
+# deploy/apparmor/tidepool-proxy
+#
+# AppArmor profile for the frontend proxy — the only network-facing process,
+# so the profile is the tightest of the set: node executing one forwarder,
+# a TCP listener, one Unix socket dial, and NOTHING under /var/lib/tidepool
+# except run/ (plus the config file it reads for the port number).
+#
+# AppArmor cannot distinguish inbound accept() from outbound connect() on
+# inet sockets, so "no Internet egress" for the proxy is delivered by the
+# code (only dial: the fixed socketPath) + host nftables (required layer),
+# while this profile removes everything an exploited proxy would want next:
+# no other executables, no data paths, no corpus, no config writes.
+#
+# Load: sudo install -m 644 tidepool-proxy /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/tidepool-proxy
+
+abi <abi/3.0>,
+include <tunables/global>
+
+profile tidepool-proxy flags=(attach_disconnected,mediate_deleted) {
+  include <abstractions/base>
+
+  /usr/local/bin/node ix,
+  deny /{usr/,}bin/{da,ba,}sh x,
+  deny /usr/bin/** x,
+  deny /usr/local/bin/{npm,npx,corepack}* x,
+
+  # the TCP listener + the api.sock dial
+  network inet stream,
+  network inet6 stream,
+  network unix stream,
+  deny network inet dgram,
+  deny network inet6 dgram,
+  deny network raw,
+  deny network packet,
+
+  /app/ r,
+  /app/** r,
+  # listener configuration only (port number); content is irrelevant to it
+  /var/lib/tidepool/config/ r,
+  /var/lib/tidepool/config/** r,
+  /var/lib/tidepool/run/ r,
+  /var/lib/tidepool/run/** rw,
+
+  # no data, no trust anchors, no corpus — none of it is mounted, and the
+  # profile pins that down
+  deny /var/lib/tidepool/corpus/** rwklx,
+  deny /var/lib/tidepool/published/** rwklx,
+  deny /var/lib/tidepool/keyrings/** rwklx,
+  deny /var/lib/tidepool/cache/** rwklx,
+
+  owner /tmp/ rw,
+  owner /tmp/** rwk,
+  owner @{PROC}/@{pid}/maps r,
+  owner @{PROC}/@{pid}/status r,
+  owner @{PROC}/@{pid}/stat r,
+  owner @{PROC}/@{pid}/task/ r,
+  owner @{PROC}/@{pid}/task/** r,
+  owner @{PROC}/@{pid}/fd/ r,
+  @{PROC}/sys/kernel/hostname r,
+  /sys/fs/cgroup/** r,
+  /etc/hosts r,
+  /etc/nsswitch.conf r,
+  /etc/localtime r,
+  /usr/share/zoneinfo/** r,
+
+  deny capability,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny ptrace,
+  deny /proc/kcore r,
+  deny /proc/sys/** w,
+  deny /sys/** w,
+  deny /var/lib/tidepool/config/** w,
+  deny /app/** w,
+
+  signal (receive) set=(term, kill, int, quit, hup) peer=unconfined,
+  signal (send, receive) peer=tidepool-proxy,
+}

@@ -1,0 +1,12 @@
+# deploy/quadlet/templates/tidepool-backup.service.in
+# Host-operational backup: consistent SQLite backup + selected objects +
+# checksummed manifest, verified before success is declared, with at least
+# one prior verified backup preserved (backup.sh enforces both).
+[Unit]
+Description=Tidepool verified corpus backup
+
+[Service]
+Type=oneshot
+ExecStart=@TIDEPOOL_HOME@/bin/backup.sh
+Nice=10
+IOSchedulingClass=idle

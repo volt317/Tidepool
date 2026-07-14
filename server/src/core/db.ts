@@ -14,7 +14,7 @@
 // a table happens to exist, and a previously applied migration whose file
 // content has drifted is a hard failure.
 
-import { mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,7 +34,7 @@ export interface SqliteDatabase {
   close(): void;
 }
 interface SqliteModule {
-  DatabaseSync: new (path: string) => SqliteDatabase;
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDatabase;
   backup?: (db: SqliteDatabase, path: string, options?: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -44,9 +44,17 @@ export function sqliteModule(): SqliteModule {
   return mod;
 }
 
-/** Default migrations directory: server/migrations, resolved relative to the
- *  compiled module (server/dist/server/src/core → ../../../../migrations). */
-export const DEFAULT_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "migrations");
+/** Default migrations directory: server/migrations. The compiled layout is
+ *  server/dist/server/src/core (four levels above → server/); a direct tsx
+ *  run executes from server/src/core (three levels above → server/). Probe
+ *  both so every entrypoint — services, CLIs, tests — resolves correctly. */
+export const DEFAULT_MIGRATIONS_DIR = ((): string => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [join(here, "..", "..", "..", "..", "migrations"), join(here, "..", "..", "migrations")]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return join(here, "..", "..", "..", "..", "migrations"); // let open fail with a clear path
+})();
 
 const PRAGMAS = [
   "PRAGMA journal_mode = WAL",
@@ -67,15 +75,47 @@ export interface OpenedDb {
 /**
  * Open (creating if needed) the store database under `dataDir`, apply
  * pragmas, and bring the schema up to date via the ordered migrations.
+ *
+ * DEPLOYMENT-EVOLUTION NOTE: the authoritative database now lives in a
+ * dedicated `writer/` subdirectory (corpus/writer/tidepool.sqlite3) so
+ * read-side services can be given the corpus tree WITHOUT the writer path
+ * ever appearing in their mount namespace. A legacy database at the old
+ * dataDir root is moved into place once, before opening (safe: the writer
+ * is the only opener of this path, and it hasn't opened it yet).
  */
 export function openDatabase(dataDir: string, migrationsDir = DEFAULT_MIGRATIONS_DIR): OpenedDb {
-  mkdirSync(dataDir, { recursive: true });
-  const path = join(dataDir, "tidepool.sqlite3");
+  const writerDir = join(dataDir, "writer");
+  mkdirSync(writerDir, { recursive: true });
+  const path = join(writerDir, "tidepool.sqlite3");
+  // one-time legacy relocation (pre-split layouts kept the db at the root)
+  const legacy = join(dataDir, "tidepool.sqlite3");
+  if (!existsSync(path) && existsSync(legacy)) {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      if (existsSync(legacy + suffix)) renameSync(legacy + suffix, path + suffix);
+    }
+  }
   const { DatabaseSync } = sqliteModule();
   const db = new DatabaseSync(path);
   for (const p of PRAGMAS) db.exec(p);
   const migrations = runMigrations(db, migrationsDir);
   return { db, path, migrations };
+}
+
+/**
+ * Open a PUBLISHED REPLICA file with SQLite's real read-only mode
+ * (SQLITE_OPEN_READONLY): the API's connection to published truth. Replicas
+ * are consistent single-file images produced by the collector's backup step
+ * and replaced only by atomic rename — never modified in place — so a
+ * read-only open needs no WAL/-shm cooperation. Migrations are VERIFIED
+ * against the shipped files' digests, never applied.
+ */
+export function openReplica(file: string, migrationsDir = DEFAULT_MIGRATIONS_DIR): OpenedDb {
+  if (!existsSync(file)) throw new Error(`published replica not found at ${file} — has the collector published yet?`);
+  const { DatabaseSync } = sqliteModule();
+  const db = new DatabaseSync(file, { readOnly: true });
+  db.exec("PRAGMA query_only = ON"); // belt and braces on top of readOnly
+  const migrations = verifyMigrations(db, migrationsDir);
+  return { db, path: file, migrations };
 }
 
 /**
@@ -95,7 +135,7 @@ export function openDatabase(dataDir: string, migrationsDir = DEFAULT_MIGRATIONS
  * version before startup" requirement.
  */
 export function openDatabaseQueryOnly(dataDir: string, migrationsDir = DEFAULT_MIGRATIONS_DIR): OpenedDb {
-  const path = join(dataDir, "tidepool.sqlite3");
+  const path = join(dataDir, "writer", "tidepool.sqlite3");
   const { DatabaseSync } = sqliteModule();
   const db = new DatabaseSync(path);
   for (const p of PRAGMAS) db.exec(p);

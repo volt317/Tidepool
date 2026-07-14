@@ -1,16 +1,21 @@
 # deploy/apparmor/tidepool-api
 #
-# AppArmor profile for the Tidepool API container — the only Internet-facing
-# process, therefore the most likely first target. It needs strictly less
-# than the collector: no gpgv, no keyrings, no /tmp scratch beyond node's own.
+# AppArmor profile for the Tidepool API container (isolated-appliance form).
 #
-# The corpus tree must remain WRITABLE at the profile level even though the
-# service's SQLite connection is latched query-only: a WAL reader must be
-# able to map/extend the -shm file and take the read locks ('k'). The
-# guarantee that the API cannot alter evidence is enforced by SQLite
-# (PRAGMA query_only = ON — every write on that connection is rejected) and
-# exercised by the deployment verification. The profile still forbids what
-# it can: config, code, and everything outside the two mounted trees.
+# The API now runs with Network=none and reads only PUBLISHED truth, which
+# lets this profile make claims the previous pod-form could not:
+#
+#   * inet/inet6 are DENIED OUTRIGHT — with no network namespace the only
+#     legitimate sockets are unix (the run/ listener). "The API cannot
+#     contact the Internet" is enforced twice: no netns, and no inet
+#     socket family.
+#   * the WRITER path is denied BY NAME. It also isn't mounted; the deny
+#     rule means even a mount-configuration mistake doesn't silently
+#     reopen the door.
+#   * the published replica, objects, and snapshots are READ-ONLY at the
+#     profile level — matching the read-only mounts and the
+#     SQLITE_OPEN_READONLY connection. Three layers must all fail before
+#     the API can write corpus-derived state.
 #
 # Load: sudo install -m 644 tidepool-api /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/tidepool-api
 
@@ -21,24 +26,18 @@ profile tidepool-api flags=(attach_disconnected,mediate_deleted) {
   include <abstractions/base>
 
   # ------------------------------------------------------------ execution
-  # node only. No gpgv here — the API image doesn't even contain it, and the
-  # profile makes that a property of the policy, not just the image.
   /usr/local/bin/node ix,
   deny /{usr/,}bin/{da,ba,}sh x,
   deny /usr/bin/** x,
   deny /usr/local/bin/{npm,npx,corepack}* x,
 
   # ------------------------------------------------------------ networking
-  # inet stream: the listener on :8747 and the fixed pod-loopback dial to
-  # the collector (:8748). "Outbound: none" toward the Internet is enforced
-  # by code paths (the API contains no upstream fetch logic) and can be made
-  # kernel-hard with the optional egress lockdown documented in
-  # deploy/README.md; AppArmor itself cannot tell inbound from outbound TCP.
-  network inet stream,
-  network inet6 stream,
-  network inet dgram,
-  network inet6 dgram,
+  # unix only: the api.sock listener and health checks. No inet at all —
+  # the container has no network namespace (Network=none) and this profile
+  # keeps that true even if the unit were misconfigured.
   network unix stream,
+  deny network inet,
+  deny network inet6,
   deny network raw,
   deny network packet,
 
@@ -47,13 +46,36 @@ profile tidepool-api flags=(attach_disconnected,mediate_deleted) {
   /app/** r,
   /var/lib/tidepool/config/ r,
   /var/lib/tidepool/config/** r,
-  /var/lib/tidepool/corpus/ rw,
-  /var/lib/tidepool/corpus/** rwk,
+
+  # published replica: read-only (the API's SQLite connection is
+  # SQLITE_OPEN_READONLY against an atomically replaced file — no WAL/-shm
+  # cooperation needed, so no write or lock grants either)
+  /var/lib/tidepool/published/ r,
+  /var/lib/tidepool/published/** r,
+
+  # normalized record blobs + finalized snapshots: the two read-only trees
+  # state reconstruction strictly requires
+  /var/lib/tidepool/corpus/objects/ r,
+  /var/lib/tidepool/corpus/objects/** r,
+  /var/lib/tidepool/corpus/snapshots/ r,
+  /var/lib/tidepool/corpus/snapshots/** r,
+
+  # the AUTHORITATIVE WRITER — denied by name, belt over the missing mount
+  deny /var/lib/tidepool/corpus/writer/ rwklx,
+  deny /var/lib/tidepool/corpus/writer/** rwklx,
+  # everything else under corpus/ (exports, locks…): not the API's business
+  deny /var/lib/tidepool/corpus/exports/** rwklx,
+
+  # runtime sockets: create/bind api.sock
+  /var/lib/tidepool/run/ rw,
+  /var/lib/tidepool/run/** rwk,
+
+  # keyrings and the collector-private cache: no reason to exist here
+  deny /var/lib/tidepool/keyrings/** rwklx,
+  deny /var/lib/tidepool/cache/** rwklx,
+
   owner /tmp/ rw,
   owner /tmp/** rwk,
-
-  # keyrings: the API has no reason to see trust anchors at all
-  deny /var/lib/tidepool/keyrings/** rwklx,
 
   owner @{PROC}/@{pid}/maps r,
   owner @{PROC}/@{pid}/status r,
@@ -64,7 +86,6 @@ profile tidepool-api flags=(attach_disconnected,mediate_deleted) {
   @{PROC}/sys/kernel/hostname r,
   /sys/fs/cgroup/** r,
   /etc/hosts r,
-  /etc/resolv.conf r,
   /etc/nsswitch.conf r,
   /etc/ssl/certs/ r,
   /etc/ssl/certs/** r,

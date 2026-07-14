@@ -154,6 +154,10 @@ export class SnapshotStore {
   ) {
     mkdirSync(root, { recursive: true });
   }
+  /** provenance recorded into every manifest this store saves (deployment-
+   *  evolution addition: the software/config identity behind a snapshot) */
+  provenance: Record<string, unknown> | null = null;
+
   save(doc: SnapshotDoc): string {
     const digest = doc.digest ?? digestOf(doc);
     const path = join(this.root, `${digest}.json`);
@@ -161,6 +165,7 @@ export class SnapshotStore {
     // snapshot manifests are immutable rows joining the exact observation,
     // change, and finding sets the document was built from
     this.manifests?.recordSnapshotManifest({
+      provenance: this.provenance ? { ...this.provenance, ruleVersions: doc.ruleVersions } : { ruleVersions: doc.ruleVersions },
       digest,
       window: doc.window,
       createdAt: doc.createdAt,

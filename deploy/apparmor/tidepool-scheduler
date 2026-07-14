@@ -1,9 +1,11 @@
 # deploy/apparmor/tidepool-scheduler
 #
 # AppArmor profile for the Tidepool SCHEDULER container — the smallest trust
-# domain in the pod. It holds no data access whatsoever: no corpus, no
-# keyrings, no cache. Its entire job is dialing the collector's pod-internal
-# control endpoint on a timer and answering its own /healthz.
+# domain in the appliance. It holds no data access whatsoever: no corpus, no
+# keyrings, no cache — and, in the isolated-appliance form, NO INET SOCKETS:
+# it runs with Network=none, dials the collector over the Unix control
+# socket, and its health signal is a heartbeat file. The inet denial below
+# is enforceable precisely because of that design.
 #
 # Load: sudo install -m 644 tidepool-scheduler /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/tidepool-scheduler
 
@@ -19,12 +21,10 @@ profile tidepool-scheduler flags=(attach_disconnected,mediate_deleted) {
   deny /usr/bin/** x,
   deny /usr/local/bin/{npm,npx,corepack}* x,
 
-  # loopback HTTP to the collector + its own health listener
-  network inet stream,
-  network inet6 stream,
-  network inet dgram,
-  network inet6 dgram,
+  # unix only: the collector control socket. No inet of any kind.
   network unix stream,
+  deny network inet,
+  deny network inet6,
   deny network raw,
   deny network packet,
 
@@ -35,8 +35,13 @@ profile tidepool-scheduler flags=(attach_disconnected,mediate_deleted) {
   /app/** r,
   /var/lib/tidepool/config/ r,
   /var/lib/tidepool/config/** r,
+  # runtime: dial the control socket, write its own heartbeat — nothing else
+  /var/lib/tidepool/run/ rw,
+  /var/lib/tidepool/run/** rwk,
   deny /var/lib/tidepool/corpus/** rwklx,
   deny /var/lib/tidepool/keyrings/** rwklx,
+  deny /var/lib/tidepool/cache/** rwklx,
+  deny /var/lib/tidepool/published/** rwklx,
 
   owner /tmp/ rw,
   owner /tmp/** rwk,

@@ -127,6 +127,7 @@ const CHANGE_KINDS = [
   "package-added", "package-removed", "version-moved", "metadata-changed",
   "advisory-published", "advisory-modified", "advisory-withdrawn", "advisory-left-coverage-window", "advisory-no-longer-observed",
   "source-failure", "source-recovery", "verification-transition", "signer-transition",
+  "evidence-observed", "evidence-changed", "evidence-no-longer-observed",
 ] as const;
 const STAGES = ["observation", "churn", "interpretive"] as const;
 
@@ -222,7 +223,7 @@ function validateEcosystem(c: Ctx, v: unknown, path: string): void {
  */
 export function validateConfig(v: unknown): { config?: TidepoolConfig; errors: string[] } {
   const c = new Ctx();
-  const root = obj(c, v, "config", ["server", "distros", "ecosystems", "enrichment", "packageHints"]);
+  const root = obj(c, v, "config", ["server", "distros", "ecosystems", "enrichment", "packageHints", "scheduler", "maintenance"]);
   if (!root) return { errors: c.errors };
 
   const server = obj(c, root.server ?? {}, "config.server", ["port", "cacheDir", "dataDir", "indexTtlHours", "advisoryTtlHours"]);
@@ -250,6 +251,49 @@ export function validateConfig(v: unknown): { config?: TidepoolConfig; errors: s
     const id = isObj(u) && typeof u.id === "string" ? u.id : `#${i}`;
     if (seen.has(id)) c.fail("config", `duplicate unit id: ${id}`);
     seen.add(id);
+  }
+
+  // deployment-evolution addition: scheduler cadence + maintenance policy —
+  // core application behavior belongs in this one validated document
+  if (root.scheduler !== undefined) {
+    const sch = obj(c, root.scheduler, "config.scheduler", [
+      "enabled", "collectionInterval", "snapshotInterval", "verificationInterval", "enrichmentInterval", "snapshotStage", "snapshotWindowHours",
+    ]);
+    if (sch) {
+      if (sch.enabled !== undefined) bool(c, sch.enabled, "config.scheduler.enabled");
+      for (const k of ["collectionInterval", "snapshotInterval", "verificationInterval", "enrichmentInterval"] as const) {
+        if (sch[k] !== undefined) {
+          const d = str(c, sch[k], `config.scheduler.${k}`, { max: 16 });
+          if (d !== undefined && !/^\d+(\.\d+)?[mhd]$/.test(d)) c.fail(`config.scheduler.${k}`, 'must be a duration like "30m", "6h", "7d"');
+        }
+      }
+      if (sch.snapshotStage !== undefined) enumOf(c, sch.snapshotStage, "config.scheduler.snapshotStage", STAGES);
+      if (sch.snapshotWindowHours !== undefined) num(c, sch.snapshotWindowHours, "config.scheduler.snapshotWindowHours", { min: 1, max: 8760 });
+    }
+  }
+  if (root.maintenance !== undefined) {
+    const m = obj(c, root.maintenance, "config.maintenance", ["publishReplicaAfterCollection", "enrichment", "backup", "retention"]);
+    if (m) {
+      if (m.publishReplicaAfterCollection !== undefined) bool(c, m.publishReplicaAfterCollection, "config.maintenance.publishReplicaAfterCollection");
+      if (m.enrichment !== undefined) {
+        const e = obj(c, m.enrichment, "config.maintenance.enrichment", ["changedWindowHours", "maxPerRun"]);
+        if (e) {
+          if (e.changedWindowHours !== undefined) num(c, e.changedWindowHours, "config.maintenance.enrichment.changedWindowHours", { min: 1, max: 8760 });
+          if (e.maxPerRun !== undefined) int(c, e.maxPerRun, "config.maintenance.enrichment.maxPerRun", { min: 1, max: 1000 });
+        }
+      }
+      if (m.backup !== undefined) {
+        const b = obj(c, m.backup, "config.maintenance.backup", ["enabled", "retainVerified"]);
+        if (b) {
+          if (b.enabled !== undefined) bool(c, b.enabled, "config.maintenance.backup.enabled");
+          if (b.retainVerified !== undefined) int(c, b.retainVerified, "config.maintenance.backup.retainVerified", { min: 1, max: 365 });
+        }
+      }
+      if (m.retention !== undefined) {
+        const r = obj(c, m.retention, "config.maintenance.retention", ["enabled"]);
+        if (r && r.enabled !== undefined) bool(c, r.enabled, "config.maintenance.retention.enabled");
+      }
+    }
   }
 
   if (root.enrichment !== undefined) {

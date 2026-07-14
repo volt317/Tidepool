@@ -1,6 +1,6 @@
 # ADR 0007 — Runtime service separation for the containerized deployment
 
-Status: accepted.
+Status: accepted (pod topology and TCP control plane superseded by ADR 0008; the service split itself stands).
 
 ## Context
 

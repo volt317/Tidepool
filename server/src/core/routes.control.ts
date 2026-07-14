@@ -21,8 +21,27 @@ import type { SnapshotStage } from "../../../shared/types.js";
 
 const STAGES: SnapshotStage[] = ["observation", "churn", "interpretive"];
 
-export function buildControlRouter(agg: Aggregator, snapshots: SnapshotStore): Router {
+export interface ControlHooks {
+  /** invoked after any corpus-mutating operation completes — the collector
+   *  uses it to publish a fresh read replica (deployment-evolution) */
+  afterMutation?: (reason: string) => void;
+  /** structured request logging with attribution */
+  logRequest?: (fields: Record<string, unknown>) => void;
+}
+
+export function buildControlRouter(agg: Aggregator, snapshots: SnapshotStore, hooks: ControlHooks = {}): Router {
   const r = Router();
+
+  // attribution: every control request carries a request id + caller — part
+  // of the narrow-protocol contract (see services/ipc.ts)
+  r.use((req, _res, next) => {
+    hooks.logRequest?.({
+      op: `${req.method} ${req.path}`,
+      requestId: req.header("x-request-id") ?? null,
+      caller: req.header("x-caller") ?? null,
+    });
+    next();
+  });
 
   r.post("/domains/:domain/units/:unit/sync", (req, res) => {
     const p = agg.provider(req.params.domain, req.params.unit);
@@ -30,9 +49,12 @@ export function buildControlRouter(agg: Aggregator, snapshots: SnapshotStore): R
       res.status(404).json({ error: "unknown unit" });
       return;
     }
-    void agg.sync(p, { force: true }).catch(() => {
-      /* state carries the error */
-    });
+    void agg
+      .sync(p, { force: true })
+      .then(() => hooks.afterMutation?.(`sync ${p.domain}/${p.id}`))
+      .catch(() => {
+        /* state carries the error */
+      });
     res.status(202).json({ started: true });
   });
 
@@ -77,6 +99,7 @@ export function buildControlRouter(agg: Aggregator, snapshots: SnapshotStore): R
         window: explicit,
       });
       const digest = snapshots.save(doc);
+      hooks.afterMutation?.(`snapshot ${digest.slice(0, 12)}`);
       res.status(201).json({
         digest,
         stage: doc.stage,
@@ -101,13 +124,88 @@ export function buildControlRouter(agg: Aggregator, snapshots: SnapshotStore): R
    *  through the read surface exactly as with manual syncs. */
   r.post("/control/sync-all", (_req, res) => {
     const started: string[] = [];
+    const work: Promise<unknown>[] = [];
     for (const p of agg.allProviders()) {
       started.push(`${p.domain}/${p.id}`);
-      void agg.sync(p, { force: true }).catch(() => {
-        /* state carries the error */
-      });
+      work.push(
+        agg.sync(p, { force: true }).catch(() => {
+          /* state carries the error */
+        })
+      );
     }
+    void Promise.all(work).then(() => hooks.afterMutation?.("sync-all"));
     res.status(202).json({ started });
+  });
+
+  /** Publish a fresh read replica on demand. */
+  r.post("/control/publish", (_req, res) => {
+    hooks.afterMutation?.("explicit publish request");
+    res.status(202).json({ publishing: true });
+  });
+
+  /** Bounded enrichment of a KNOWN entity: the unit must be configured and
+   *  the package must exist in the unit's current state — arbitrary names
+   *  never reach the network. Results are recorded as evidence observations
+   *  by the aggregator (recordEvidence: true in the collector). */
+  r.post("/control/enrich", async (req, res) => {
+    try {
+      const { domain, unit, package: name } = (req.body ?? {}) as { domain?: string; unit?: string; package?: string };
+      if (!domain || !unit || !name) {
+        res.status(400).json({ error: "domain, unit, and package are required" });
+        return;
+      }
+      const p = agg.provider(domain, unit);
+      if (!p) {
+        res.status(404).json({ error: "unknown unit" });
+        return;
+      }
+      const st = await agg.ensureSynced(p);
+      if (st.status !== "ready") {
+        res.status(409).json({ error: "unit has no current state to validate against — sync first" });
+        return;
+      }
+      const out = await agg.enrich(p, st, name);
+      if (!out) {
+        res.status(404).json({ error: "package not in this unit's index — enrichment of unknown entities is refused" });
+        return;
+      }
+      hooks.afterMutation?.(`enrich ${domain}/${unit}/${name}`);
+      res.json({ package: name, surfaces: out.payload.records.length, cached: out.cached });
+    } catch (e) {
+      res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+    }
+  });
+
+  /** Policy enrichment: enrich packages that CHANGED in the recent window,
+   *  bounded by maxPerRun. This is the scheduler's enrichment entry point —
+   *  configured, bounded, attributable, persisted. */
+  r.post("/control/enrich-changed", async (req, res) => {
+    try {
+      const windowHours = Math.min(Number(req.body?.windowHours ?? 24), 24 * 30);
+      const limit = Math.min(Number(req.body?.limit ?? 25), 1000);
+      const since = Date.now() - windowHours * 3600_000;
+      const enriched: string[] = [];
+      const skippedUnits: string[] = [];
+      outer: for (const p of agg.allProviders()) {
+        const changes = agg.store.changesFor(p.domain, p.id, { from: since });
+        const names = [...new Set(changes.map((c) => c.package).filter((n): n is string => !!n))];
+        if (names.length === 0) continue;
+        const st = await agg.ensureSynced(p);
+        if (st.status !== "ready") {
+          skippedUnits.push(`${p.domain}/${p.id}`);
+          continue;
+        }
+        for (const name of names) {
+          if (enriched.length >= limit) break outer;
+          const out = await agg.enrich(p, st, name);
+          if (out) enriched.push(`${p.domain}/${p.id}/${name}`);
+        }
+      }
+      if (enriched.length > 0) hooks.afterMutation?.(`enrich-changed (${enriched.length})`);
+      res.json({ windowHours, limit, enriched, skippedUnits });
+    } catch (e) {
+      res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+    }
   });
 
   /** Corpus maintenance: integrity verification.
@@ -115,6 +213,7 @@ export function buildControlRouter(agg: Aggregator, snapshots: SnapshotStore): R
   r.post("/control/maintenance", (_req, res) => {
     try {
       const verification = agg.store.verifyCorpus();
+      hooks.afterMutation?.("maintenance");
       res.json({ ok: verification.ok, checks: verification.checks });
     } catch (e) {
       res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
