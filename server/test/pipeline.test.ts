@@ -296,3 +296,66 @@ test("vcpkgVersion renders version#port-version across the field variants", () =
   assert.equal(vcpkgVersion({ "version-date": "2026-01-01", "port-version": 2 }), "2026-01-01#2");
   assert.equal(vcpkgVersion({}), null);
 });
+
+test("dispatch compares with native ecosystem semantics, not dpkg-for-everything", () => {
+  // regression: a prerelease pin vs the release. Under the old debCompare
+  // path, 1.0.0-rc.1 parsed as a Debian REVISION and sorted AFTER 1.0.0,
+  // silently suppressing the update finding. Semver orders it before.
+  const doc = sampleDoc();
+  doc.entities.push({ domain: "code", unit: "npm", name: "prerelease-pkg", source: "prerelease-pkg", versions: { api: "1.0.0" }, current: "1.0.0", ordering: "native", drift: false, advisoryCount: 0 });
+  const root = mkdtempSync(join(tmpdir(), "tp-natv-"));
+  try {
+    const d = join(root, "svc");
+    mkdirSync(d);
+    writeFileSync(join(d, "package.json"), JSON.stringify({ dependencies: { "prerelease-pkg": "*" } }));
+    writeFileSync(join(d, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/prerelease-pkg": { version: "1.0.0-rc.1" } } }));
+    const artifact = analyzeAgainstSnapshot([classifyPath(d)], doc);
+    const f = artifact.findings.find((x) => x.kind === "dependency-update-available" && x.subject.includes("prerelease-pkg"));
+    assert.ok(f, "semver sees rc.1 < 1.0.0 → update available");
+    assert.match(f?.confidenceBasis ?? "", /semver/, "the basis names the native strategy");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dispatch refuses ordering claims when the ecosystem ordering is unsupported", () => {
+  const doc = sampleDoc();
+  doc.entities.push({ domain: "code", unit: "vcpkg", name: "zlib", source: "zlib", versions: { "versions-db": "1.3.2#1" }, current: "1.3.2#1", ordering: "unsupported", drift: false, advisoryCount: 0 });
+  doc.scope.units.push("code/vcpkg");
+  const root = mkdtempSync(join(tmpdir(), "tp-unsup-"));
+  try {
+    const d = join(root, "native");
+    mkdirSync(d);
+    writeFileSync(join(d, "vcpkg.json"), JSON.stringify({ dependencies: [{ name: "zlib", "version>=": "1.3.0" }] }));
+    writeFileSync(join(d, "CMakeLists.txt"), "project(x)\n");
+    const profile = classifyPath(d);
+    const dep = profile.dependencies.find((x) => x.name === "zlib");
+    // only meaningful if the classifier pinned a version; force one if not
+    if (dep && !dep.version) dep.version = "1.3.0";
+    const artifact = analyzeAgainstSnapshot([profile], doc);
+    assert.ok(!artifact.findings.some((f) => f.kind === "dependency-update-available" && f.subject.includes("zlib")), "no fabricated update claim");
+    const honest = artifact.findings.find((f) => f.kind === "insufficient-evidence" && f.subject.includes("zlib"));
+    assert.ok(honest, "an honest no-ordering finding instead");
+    assert.match(honest?.summary ?? "", /ordering is unsupported/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dispatch: an in-scope but never-observed base-image unit yields insufficient evidence, not silence", () => {
+  const doc = sampleDoc();
+  doc.scope.units.push("distro/ubuntu-noble"); // configured, but zero coverage rows
+  const root = mkdtempSync(join(tmpdir(), "tp-base-"));
+  try {
+    const d = join(root, "img");
+    mkdirSync(d);
+    writeFileSync(join(d, "Dockerfile"), "FROM ubuntu:24.04\n");
+    const artifact = analyzeAgainstSnapshot([classifyPath(d)], doc);
+    const f = artifact.findings.find((x) => x.kind === "insufficient-evidence" && x.subject === "distro/ubuntu-noble");
+    assert.ok(f, "unobserved unit is called out");
+    assert.match(f?.summary ?? "", /no observations at the snapshot boundary/);
+    assert.ok(!artifact.findings.some((x) => x.kind === "no-relevant-upstream-change" && x.path === d), "no blanket all-quiet claim");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

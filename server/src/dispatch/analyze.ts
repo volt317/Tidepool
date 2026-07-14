@@ -32,7 +32,8 @@ import type {
   SnapshotDoc,
   SnapshotEntity,
 } from "../../../shared/types.js";
-import { debCompare, sha256hex } from "../lib/util.js";
+import { sha256hex } from "../lib/util.js";
+import { adapterFor } from "../lib/versions.js";
 import { digestOf } from "../core/inflow.js";
 
 export const ANALYZER_VERSIONS: Record<string, string> = {
@@ -410,7 +411,23 @@ export function analyzeAgainstSnapshot(profiles: ProjectProfile[], snapshot: Sna
           }
 
           if (dep.version && ent.current) {
-            const cmp = debCompare(dep.version, ent.current);
+            // native ecosystem semantics — never dpkg rules for npm/pypi/etc.
+            const adapter = adapterFor(dep.ecosystem);
+            if (adapter.ordering === "unsupported" || ent.ordering === "unsupported") {
+              findings.push({
+                path: profile.path,
+                kind: "insufficient-evidence",
+                subject: entityKey(ent),
+                summary: `${dep.name}: local ${dep.version}, snapshot current ${ent.current} — ${dep.ecosystem} version ordering is unsupported (${adapter.strategy}); no update claim is made.`,
+                confidence: 0.5,
+                confidenceBasis: "exact name match; ordering honesty per ADR 0005",
+                evidence: { snapshotEntities: [entityKey(ent)], changes: [], localOrigins: [dep.origin] },
+                recommendedAction: "compare the two versions manually using the ecosystem's own rules",
+              });
+              continue;
+            }
+            const canon = (v: string) => (adapter.canonicalizeVersion ? adapter.canonicalizeVersion(v) : v);
+            const cmp = adapter.compareVersions(canon(dep.version), canon(ent.current));
             if (cmp < 0) {
               findings.push({
                 path: profile.path,
@@ -418,7 +435,7 @@ export function analyzeAgainstSnapshot(profiles: ProjectProfile[], snapshot: Sna
                 subject: entityKey(ent),
                 summary: `${dep.name}: local ${dep.version} < upstream ${ent.current} (${unitPath}).`,
                 confidence: 0.9,
-                confidenceBasis: "dpkg-semantic comparison of locked version vs snapshot current",
+                confidenceBasis: `native ${adapter.strategy} comparison of locked version vs snapshot current`,
                 evidence: {
                   snapshotEntities: [entityKey(ent)],
                   changes: versionMoves.map((c) => c.id),
@@ -454,6 +471,22 @@ export function analyzeAgainstSnapshot(profiles: ProjectProfile[], snapshot: Sna
       const unitPath = `distro/${base.unit}`;
       if (!snapshot.scope.units.includes(unitPath)) continue;
       anyRelevant = true;
+      // configured scope is not observation: a unit with no coverage at the
+      // boundary was never observed — quiet here means unobserved, not safe
+      const observed = snapshot.coverage.some((c) => c.unit === base.unit && c.status !== "unobserved");
+      if (!observed) {
+        findings.push({
+          path: profile.path,
+          kind: "insufficient-evidence",
+          subject: unitPath,
+          summary: `Base image ${base.image} maps to ${unitPath}, which has no observations at the snapshot boundary — its update posture cannot be evaluated.`,
+          confidence: 0.9,
+          confidenceBasis: "unit is in configured scope but was never observed; bounded truth, not proof of quiet",
+          evidence: { snapshotEntities: [], changes: [], localOrigins: ["Dockerfile"] },
+          recommendedAction: "sync the distro unit and rebuild the snapshot before judging the base image",
+        });
+        continue;
+      }
       const secMoves = snapshot.changes.filter(
         (c) => c.unit === base.unit && c.kind === "version-moved" && c.sourceId.includes("security")
       );
