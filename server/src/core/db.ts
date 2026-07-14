@@ -78,6 +78,65 @@ export function openDatabase(dataDir: string, migrationsDir = DEFAULT_MIGRATIONS
   return { db, path, migrations };
 }
 
+/**
+ * Deployment-split addition: open the store database for READ-ONLY use.
+ *
+ * The API service must be able to query the corpus without ever becoming a
+ * second writer (db.ts's single-writer invariant: the collector owns the
+ * one writer connection). A WAL database still needs the -shm file mappable,
+ * so we open a normal connection and then latch it with
+ * `PRAGMA query_only = ON` — SQLite itself rejects every write on this
+ * connection from that point on, which is a stronger guarantee than code
+ * review of the read router.
+ *
+ * Migrations are VERIFIED here, never applied: if the schema is behind the
+ * shipped migration files, or a previously applied migration's content has
+ * drifted, this refuses to open — matching the "validates SQLite schema
+ * version before startup" requirement.
+ */
+export function openDatabaseQueryOnly(dataDir: string, migrationsDir = DEFAULT_MIGRATIONS_DIR): OpenedDb {
+  const path = join(dataDir, "tidepool.sqlite3");
+  const { DatabaseSync } = sqliteModule();
+  const db = new DatabaseSync(path);
+  for (const p of PRAGMAS) db.exec(p);
+  const migrations = verifyMigrations(db, migrationsDir);
+  db.exec("PRAGMA query_only = ON");
+  return { db, path, migrations };
+}
+
+/** Check that every shipped migration is applied with a matching digest,
+ *  without executing any of them. */
+export function verifyMigrations(db: SqliteDatabase, migrationsDir: string): [number, string][] {
+  const files = readdirSync(migrationsDir)
+    .filter((f) => /^\d{4}_.+\.sql$/.test(f))
+    .sort();
+  if (files.length === 0) throw new Error(`no migrations found in ${migrationsDir}`);
+
+  let appliedRows: Record<string, unknown>[];
+  try {
+    appliedRows = db.prepare("SELECT version, digest FROM schema_migrations ORDER BY version").all();
+  } catch {
+    throw new Error("store database has no schema_migrations ledger — start the collector (the writer) first");
+  }
+  const applied = new Map(appliedRows.map((r) => [Number(r.version), String(r.digest)]));
+  const out: [number, string][] = [];
+  for (const file of files) {
+    const version = Number(file.slice(0, 4));
+    const digest = sha256hex(Buffer.from(readCorpusText(join(migrationsDir, file))));
+    const prior = applied.get(version);
+    if (prior === undefined) {
+      throw new Error(`migration ${file} has not been applied — start the collector (the writer) to migrate first`);
+    }
+    if (prior !== digest) {
+      throw new Error(
+        `migration ${file} was applied with digest ${prior.slice(0, 12)} but the file now digests to ${digest.slice(0, 12)} — refusing to read a drifted schema history`
+      );
+    }
+    out.push([version, digest]);
+  }
+  return out;
+}
+
 export function runMigrations(db: SqliteDatabase, migrationsDir: string): [number, string][] {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version    INTEGER PRIMARY KEY,

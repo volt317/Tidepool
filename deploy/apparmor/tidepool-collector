@@ -1,0 +1,118 @@
+# deploy/apparmor/tidepool-collector
+#
+# AppArmor profile for the Tidepool COLLECTOR container.
+#
+# Threat model: the collector parses attacker-influenceable bytes (package
+# indexes, advisory feeds, registry JSON) fetched from the network. If that
+# parsing is ever subverted, this profile bounds the blast radius to: the
+# corpus tree, the disk cache, and outbound sockets — i.e. exactly what the
+# collector legitimately touches anyway.
+#
+# Loading (profiles must be loaded into the kernel by root, even though the
+# containers themselves are rootless):
+#   sudo install -m 644 tidepool-collector /etc/apparmor.d/
+#   sudo apparmor_parser -r /etc/apparmor.d/tidepool-collector
+# Complain-mode variant for development: deploy/apparmor/complain.sh
+#
+# Path note: rules match paths as seen in the container's mount namespace,
+# which the Quadlet units pin to the same /var/lib/tidepool layout as the
+# host documentation — one layout to audit everywhere.
+
+abi <abi/3.0>,
+include <tunables/global>
+
+profile tidepool-collector flags=(attach_disconnected,mediate_deleted) {
+  # base: shared libraries, locale data, /dev/null & friends — the minimal
+  # plumbing every dynamically linked process needs
+  include <abstractions/base>
+
+  # ------------------------------------------------------------ execution
+  # Exactly two programs may ever execute in this container:
+  #   node — the service itself (image entrypoint)
+  #   gpgv — spawned per-pocket to verify InRelease signatures (lib/gpg.ts)
+  # 'ix' inherits this profile, so gpgv is confined identically.
+  /usr/local/bin/node ix,
+  /usr/bin/gpgv ix,
+  # Shells and package managers exist in the Debian-based image but have no
+  # business running; deny them by name so an exploit can't "just" pop sh.
+  deny /{usr/,}bin/{da,ba,}sh x,
+  deny /usr/bin/{apt,apt-get,dpkg}* x,
+  deny /usr/local/bin/{npm,npx,corepack}* x,
+
+  # ------------------------------------------------------------ networking
+  # Outbound HTTPS + DNS. AppArmor cannot express "outbound only" for TCP —
+  # the inbound-exposure guarantee comes from the pod publishing no collector
+  # port — but limiting address families still blocks raw/packet sockets.
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+  network unix stream,
+  deny network raw,
+  deny network packet,
+
+  # ------------------------------------------------------------ filesystem
+  # Application code: readable, never writable (immutable image + ReadOnly).
+  /app/ r,
+  /app/** r,
+
+  # Configuration: read-only by mount AND by profile (defense in depth).
+  /var/lib/tidepool/config/ r,
+  /var/lib/tidepool/config/** r,
+
+  # Keyrings: host-owned trust anchors, read-only.
+  /var/lib/tidepool/keyrings/ r,
+  /var/lib/tidepool/keyrings/** r,
+
+  # Corpus: the one writable tree — SQLite (+ -wal/-shm, hence 'k' for the
+  # POSIX locks SQLite requires), content-addressed objects, snapshots,
+  # exports, and the TTL disk cache underneath corpus/cache.
+  /var/lib/tidepool/corpus/ rw,
+  /var/lib/tidepool/corpus/** rwk,
+
+  # gpgv scratch: lib/gpg.ts writes the InRelease body to a mkdtemp dir.
+  # 'owner' restricts to files created by the service's own UID.
+  owner /tmp/ rw,
+  owner /tmp/** rwk,
+
+  # node runtime introspection (its own maps/status/fds only)
+  owner @{PROC}/@{pid}/maps r,
+  owner @{PROC}/@{pid}/status r,
+  owner @{PROC}/@{pid}/stat r,
+  owner @{PROC}/@{pid}/task/ r,
+  owner @{PROC}/@{pid}/task/** r,
+  owner @{PROC}/@{pid}/fd/ r,
+  @{PROC}/sys/kernel/hostname r,
+  /sys/fs/cgroup/** r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/nsswitch.conf r,
+  /etc/ssl/certs/ r,
+  /etc/ssl/certs/** r,
+  /etc/localtime r,
+  /usr/share/zoneinfo/** r,
+
+  # ------------------------------------------------------- explicit denials
+  # (capabilities are already dropped by Podman; these make the profile
+  #  independently sufficient rather than reliant on runtime flags)
+  deny capability,             # no capability may be exercised or gained
+  deny mount,                  # no new mounts inside the container
+  deny umount,
+  deny pivot_root,
+  deny ptrace,                 # no tracing anything, including itself
+  deny /proc/kcore r,          # kernel memory
+  deny /proc/sys/** w,         # kernel tunables
+  deny /sys/** w,              # sysfs writes (module params, etc.)
+  deny /dev/mem rw,            # raw device memory
+  deny /dev/kmem rw,
+  deny /dev/port rw,
+  deny /var/lib/tidepool/config/** w,   # belt-and-braces: never write config
+  deny /var/lib/tidepool/keyrings/** w, # never write trust anchors
+  deny /app/** w,                       # never write code
+
+  # ---------------------------------------------------------------- signals
+  # Receive lifecycle signals from the container runtime / systemd; send only
+  # within the profile (node → its own gpgv children).
+  signal (receive) set=(term, kill, int, quit, hup) peer=unconfined,
+  signal (send, receive) peer=tidepool-collector,
+}

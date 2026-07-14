@@ -1,0 +1,56 @@
+# deploy/quadlet/tidepool-api.container
+#
+# The API: presentation only. REST reads, snapshot listings/exports, and the
+# frontend — over a query-only SQLite connection that the database engine
+# itself prevents from writing. Collection, enrichment, and snapshot
+# creation are proxied to the collector over the pod loopback; if the
+# collector is down, reads keep working and those three answer 503.
+#
+# Privileges granted (each one justified):
+#   corpus rw mount, query-only connection — SQLite WAL readers must map the
+#       -shm file, so the MOUNT is rw while the CONNECTION is latched with
+#       PRAGMA query_only=ON (writes rejected by SQLite; verified in tests)
+#   config ro   — port, unit definitions for labeling
+#   :8747       — the pod's single published port
+# No keyrings. No gpgv in the image. No upstream egress in any code path.
+
+[Unit]
+Description=Tidepool API (read surface + frontend)
+# The API refuses to start until the collector has migrated the schema
+# (it verifies, never applies, migrations) — order it after the writer.
+Wants=tidepool-collector.service
+After=tidepool-collector.service
+
+[Container]
+Image=localhost/tidepool-api:latest
+ContainerName=tidepool-api
+Pod=tidepool.pod
+
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,size=16m
+Volume=%h/.local/share/tidepool/config:/var/lib/tidepool/config:ro
+Volume=%h/.local/share/tidepool/corpus:/var/lib/tidepool/corpus:rw
+
+UserNS=keep-id:uid=10001,gid=10001
+
+DropCapability=all
+NoNewPrivileges=true
+PodmanArgs=--security-opt apparmor=tidepool-api --pids-limit=128
+PodmanArgs=--memory=512m --cpus=1.0 --ulimit=nofile=2048:2048
+
+Environment=TIDEPOOL_COLLECTOR_URL=http://127.0.0.1:8748
+
+HealthCmd=node -e "fetch('http://127.0.0.1:8747/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=15s
+HealthTimeout=5s
+
+StopTimeout=30
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

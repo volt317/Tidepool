@@ -3,6 +3,15 @@
 // Thin bootstrap: read config, build domain providers, hand them to the
 // contained core, mount the routes. All aggregation logic lives in
 // core/aggregator.ts; all domain knowledge in domains/.
+//
+// DEPLOYMENT NOTE: this is the single-process DEVELOPMENT mode (collection,
+// API, and snapshot creation in one process). The hardened container
+// deployment (deploy/) runs the split entrypoints instead:
+//   services/collector.ts   network egress + the SQLite writer
+//   services/api.ts         read-only presentation surface
+//   services/scheduler.ts   interval triggers
+// buildRouter() below composes routes.read.ts + routes.control.ts, so this
+// mode's HTTP surface is byte-identical to what it was before the split.
 
 import express from "express";
 import rateLimit from "express-rate-limit";

@@ -1,0 +1,91 @@
+# deploy/apparmor/tidepool-api
+#
+# AppArmor profile for the Tidepool API container — the only Internet-facing
+# process, therefore the most likely first target. It needs strictly less
+# than the collector: no gpgv, no keyrings, no /tmp scratch beyond node's own.
+#
+# The corpus tree must remain WRITABLE at the profile level even though the
+# service's SQLite connection is latched query-only: a WAL reader must be
+# able to map/extend the -shm file and take the read locks ('k'). The
+# guarantee that the API cannot alter evidence is enforced by SQLite
+# (PRAGMA query_only = ON — every write on that connection is rejected) and
+# exercised by the deployment verification. The profile still forbids what
+# it can: config, code, and everything outside the two mounted trees.
+#
+# Load: sudo install -m 644 tidepool-api /etc/apparmor.d/ && sudo apparmor_parser -r /etc/apparmor.d/tidepool-api
+
+abi <abi/3.0>,
+include <tunables/global>
+
+profile tidepool-api flags=(attach_disconnected,mediate_deleted) {
+  include <abstractions/base>
+
+  # ------------------------------------------------------------ execution
+  # node only. No gpgv here — the API image doesn't even contain it, and the
+  # profile makes that a property of the policy, not just the image.
+  /usr/local/bin/node ix,
+  deny /{usr/,}bin/{da,ba,}sh x,
+  deny /usr/bin/** x,
+  deny /usr/local/bin/{npm,npx,corepack}* x,
+
+  # ------------------------------------------------------------ networking
+  # inet stream: the listener on :8747 and the fixed pod-loopback dial to
+  # the collector (:8748). "Outbound: none" toward the Internet is enforced
+  # by code paths (the API contains no upstream fetch logic) and can be made
+  # kernel-hard with the optional egress lockdown documented in
+  # deploy/README.md; AppArmor itself cannot tell inbound from outbound TCP.
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+  network unix stream,
+  deny network raw,
+  deny network packet,
+
+  # ------------------------------------------------------------ filesystem
+  /app/ r,
+  /app/** r,
+  /var/lib/tidepool/config/ r,
+  /var/lib/tidepool/config/** r,
+  /var/lib/tidepool/corpus/ rw,
+  /var/lib/tidepool/corpus/** rwk,
+  owner /tmp/ rw,
+  owner /tmp/** rwk,
+
+  # keyrings: the API has no reason to see trust anchors at all
+  deny /var/lib/tidepool/keyrings/** rwklx,
+
+  owner @{PROC}/@{pid}/maps r,
+  owner @{PROC}/@{pid}/status r,
+  owner @{PROC}/@{pid}/stat r,
+  owner @{PROC}/@{pid}/task/ r,
+  owner @{PROC}/@{pid}/task/** r,
+  owner @{PROC}/@{pid}/fd/ r,
+  @{PROC}/sys/kernel/hostname r,
+  /sys/fs/cgroup/** r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/nsswitch.conf r,
+  /etc/ssl/certs/ r,
+  /etc/ssl/certs/** r,
+  /etc/localtime r,
+  /usr/share/zoneinfo/** r,
+
+  # ------------------------------------------------------- explicit denials
+  deny capability,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny ptrace,
+  deny /proc/kcore r,
+  deny /proc/sys/** w,
+  deny /sys/** w,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  deny /dev/port rw,
+  deny /var/lib/tidepool/config/** w,
+  deny /app/** w,
+
+  signal (receive) set=(term, kill, int, quit, hup) peer=unconfined,
+  signal (send, receive) peer=tidepool-api,
+}

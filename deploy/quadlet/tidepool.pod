@@ -1,0 +1,28 @@
+# deploy/quadlet/tidepool.pod
+#
+# The Tidepool pod: one shared network namespace for the three cooperating
+# services. Inside the pod, 127.0.0.1 is the pod, not the host — the
+# collector's control surface (:8748) and the scheduler's health endpoint
+# (:8749) exist ONLY here. The single published port is the API.
+#
+# Install (rootless):
+#   cp deploy/quadlet/*.{pod,container} ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user start tidepool-pod.service
+# Boot persistence for a rootless user requires lingering:
+#   loginctl enable-linger $USER
+
+[Unit]
+Description=Tidepool upstream observation appliance (pod)
+
+[Pod]
+PodName=tidepool
+# Publish ONLY the API, and only on loopback by default. Change to
+# 0.0.0.0:8747:8747 (or put a reverse proxy in front) to expose it beyond
+# the host — an explicit administrator decision, not a default.
+PublishPort=127.0.0.1:8747:8747
+# Rootless networking: Podman's default (pasta on current versions,
+# slirp4netns on older) — never host networking.
+
+[Install]
+WantedBy=default.target

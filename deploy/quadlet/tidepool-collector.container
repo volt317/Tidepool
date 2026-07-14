@@ -1,0 +1,82 @@
+# deploy/quadlet/tidepool-collector.container
+#
+# The collector: the ONLY service with upstream network egress and the ONLY
+# writer of the corpus. It publishes no port — its control surface binds the
+# pod-internal loopback (:8748), reachable by the API and scheduler because
+# pod members share one network namespace, and by nothing else.
+#
+# Privileges granted (each one justified):
+#   corpus rw     — it IS the writer: observations, artifacts, snapshots
+#   config ro     — declared sources; treated as immutable at runtime
+#   keyrings ro   — host-owned archive trust anchors for gpgv
+#   /tmp tmpfs    — gpgv verification uses short-lived temp files
+#   network       — outbound HTTPS/DNS to the configured upstreams
+# Everything else: read-only root, no capabilities, no privilege escalation,
+# no host namespaces, no devices.
+
+[Unit]
+Description=Tidepool collector (upstream observation + corpus writer)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=localhost/tidepool-collector:latest
+ContainerName=tidepool-collector
+Pod=tidepool.pod
+
+# ------------------------------------------------------------- filesystem
+# Immutable image, explicit writable paths only.
+ReadOnly=true
+# gpgv scratch space; noexec+nosuid: nothing legitimate executes from /tmp
+Tmpfs=/tmp:rw,noexec,nosuid,size=64m
+Volume=%h/.local/share/tidepool/config:/var/lib/tidepool/config:ro
+Volume=%h/.local/share/tidepool/keyrings:/var/lib/tidepool/keyrings:ro
+Volume=%h/.local/share/tidepool/corpus:/var/lib/tidepool/corpus:rw
+# On SELinux hosts append :Z to the Volume= lines above (AppArmor hosts —
+# Debian/Ubuntu — must NOT use :Z).
+
+# --------------------------------------------------------------- identity
+# Image runs as 10001; keep-id maps the rootless user's own UID onto it so
+# bind-mounted files stay owned by (and auditable as) the operator.
+UserNS=keep-id:uid=10001,gid=10001
+
+# --------------------------------------------------------------- hardening
+DropCapability=all
+NoNewPrivileges=true
+# AppArmor profile (must be loaded into the kernel first — see
+# deploy/apparmor/README and deploy/scripts/install.sh):
+PodmanArgs=--security-opt apparmor=tidepool-collector --pids-limit=256
+
+# --------------------------------------------------------------- resources
+# Conservative defaults; index parsing of full distro archives is the peak.
+# (kept in PodmanArgs rather than Quadlet keys for broad version support)
+PodmanArgs=--memory=1g --cpus=2.0 --ulimit=nofile=4096:4096
+
+# ------------------------------------------------------------ environment
+Environment=TIDEPOOL_COLLECTOR_BIND=127.0.0.1
+Environment=TIDEPOOL_COLLECTOR_PORT=8748
+# Optional GitHub enrichment token — prefer a Podman secret over config:
+#   podman secret create tidepool-github-token -   (paste, ^D)
+# Secret=tidepool-github-token,type=env,target=TIDEPOOL_GITHUB_TOKEN
+
+# ------------------------------------------------------------ health check
+HealthCmd=node -e "fetch('http://127.0.0.1:8748/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=20s
+HealthTimeout=5s
+
+# -------------------------------------------------------------- lifecycle
+# SIGTERM → the service drains in-flight observations (bounded) and closes
+# the SQLite writer cleanly; give it headroom before SIGKILL.
+StopTimeout=70
+
+[Service]
+Restart=on-failure
+RestartSec=5
+# Automatic pre-migration backup: uncomment to take a consistent corpus
+# backup before every (re)start — i.e. before any image update can migrate.
+# ExecStartPre=%h/.local/share/tidepool/bin/backup.sh
+
+[Install]
+WantedBy=default.target

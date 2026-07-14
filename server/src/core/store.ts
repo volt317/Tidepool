@@ -25,7 +25,7 @@ import type {
   SnapshotSourceCoverage,
   Verification,
 } from "../../../shared/types.js";
-import { iso, fromIso, openDatabase, sqliteModule, type OpenedDb, type SqliteDatabase } from "./db.js";
+import { iso, fromIso, openDatabase, openDatabaseQueryOnly, sqliteModule, type OpenedDb, type SqliteDatabase } from "./db.js";
 import {
   detectChanges,
   digestOf,
@@ -154,8 +154,18 @@ export class SqliteObservationStore implements ObservationStore {
   readonly opened: OpenedDb;
   private db: SqliteDatabase;
 
-  constructor(dataDir: string, migrationsDir?: string) {
+  constructor(dataDir: string, migrationsDir?: string, opts: { readOnly?: boolean } = {}) {
     this.dataDir = dataDir;
+    if (opts.readOnly) {
+      // Deployment-split addition: the API service opens the SAME corpus but
+      // through a query_only connection — SQLite rejects every write on it,
+      // preserving the single-writer invariant (the collector is the writer).
+      // No directories are created: a read-only consumer must find the
+      // corpus already laid out, or fail visibly.
+      this.opened = openDatabaseQueryOnly(dataDir, migrationsDir);
+      this.db = this.opened.db;
+      return;
+    }
     for (const d of ["objects/sha256", "snapshots", "exports", "locks"]) mkdirSync(join(dataDir, d), { recursive: true });
     this.opened = openDatabase(dataDir, migrationsDir);
     this.db = this.opened.db;

@@ -1,0 +1,54 @@
+# deploy/quadlet/tidepool-scheduler.container
+#
+# The scheduler: interval triggers only. It owns NO data — no corpus mount,
+# no keyrings, no cache — and talks exclusively to the collector's
+# pod-internal control endpoint. Config is mounted read-only solely so its
+# defaults (TTL-derived sync interval) match the collector's.
+#
+# This is the smallest trust domain in the pod: compromise of the scheduler
+# yields the ability to trigger jobs the collector already performs on its
+# own terms, and nothing else.
+
+[Unit]
+Description=Tidepool scheduler (collection / snapshot / maintenance triggers)
+Wants=tidepool-collector.service
+After=tidepool-collector.service
+
+[Container]
+Image=localhost/tidepool-scheduler:latest
+ContainerName=tidepool-scheduler
+Pod=tidepool.pod
+
+ReadOnly=true
+Tmpfs=/tmp:rw,noexec,nosuid,size=8m
+Volume=%h/.local/share/tidepool/config:/var/lib/tidepool/config:ro
+
+UserNS=keep-id:uid=10001,gid=10001
+
+DropCapability=all
+NoNewPrivileges=true
+PodmanArgs=--security-opt apparmor=tidepool-scheduler --pids-limit=64
+PodmanArgs=--memory=128m --cpus=0.5 --ulimit=nofile=512:512
+
+Environment=TIDEPOOL_COLLECTOR_URL=http://127.0.0.1:8748
+# Override cadence here (hours; 0 disables a job):
+# Environment=TIDEPOOL_SYNC_INTERVAL_HOURS=6
+# Environment=TIDEPOOL_SNAPSHOT_INTERVAL_HOURS=24
+# Environment=TIDEPOOL_SNAPSHOT_STAGE=interpretive
+# Environment=TIDEPOOL_SNAPSHOT_WINDOW_HOURS=168
+# Environment=TIDEPOOL_MAINTENANCE_INTERVAL_HOURS=24
+
+HealthCmd=node -e "fetch('http://127.0.0.1:8749/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+HealthInterval=60s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthTimeout=5s
+
+StopTimeout=15
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

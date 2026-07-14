@@ -15,7 +15,10 @@
     "start": "TIDEPOOL_SERVE_STATIC=1 node server/dist/server/src/index.js",
     "smoke": "node scripts/smoke.mjs",
     "test": "npm run build:server && node --test --enable-source-maps 'server/dist/server/test/*.test.js'",
-    "test:coverage": "npm run build:server && mkdir -p coverage && node --test --enable-source-maps --experimental-test-coverage --test-coverage-include='**/server/src/**' --test-coverage-lines=65 --test-coverage-branches=70 --test-coverage-functions=68 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info 'server/dist/server/test/*.test.js'"
+    "test:coverage": "npm run build:server && mkdir -p coverage && node --test --enable-source-maps --experimental-test-coverage --test-coverage-include='**/server/src/**' --test-coverage-lines=65 --test-coverage-branches=70 --test-coverage-functions=68 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info 'server/dist/server/test/*.test.js'",
+    "start:collector": "node server/dist/server/src/services/collector.js",
+    "start:api": "node server/dist/server/src/services/api.js",
+    "start:scheduler": "node server/dist/server/src/services/scheduler.js"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

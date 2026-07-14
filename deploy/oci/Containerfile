@@ -1,0 +1,111 @@
+# deploy/oci/Containerfile
+#
+# One multi-stage, multi-target build producing the Tidepool image family:
+#
+#     build ──▶ tidepool-base ──▶ tidepool-collector   (adds gpgv)
+#                            ├──▶ tidepool-api         (adds web/dist)
+#                            ├──▶ tidepool-scheduler   (base as-is)
+#                            └──▶ tidepool-utility     (dispatch + corpus CLIs)
+#
+# Principles:
+#   * everything is built ONCE in the build stage; runtime images copy only
+#     compiled output + production node_modules — no compilers, no npm cache
+#   * every runtime image runs as the fixed unprivileged user 10001:10001
+#     ("tidepool"), matching the ownership scheme install.sh sets up on the
+#     host bind mounts (rootless user namespace maps it back to the operator)
+#   * per-image dependency minimization:
+#       - only the collector carries gpgv (signature verification)
+#       - only the api carries the built frontend
+#       - the scheduler and utility images carry neither
+#     (all images share the node runtime + express; Tidepool's server has
+#      exactly two npm dependencies, so there is no HTTP-client library to
+#      strip from the dispatch image — collection uses node's built-in fetch,
+#      and code that is never executed is denied execution by AppArmor and
+#      egress by the network policy rather than by image surgery)
+#   * images are immutable: all state lives on the /var/lib/tidepool mounts;
+#     containers run with a read-only root filesystem (enforced in Quadlet)
+#
+# Build (from the repository root):
+#   podman build -f deploy/oci/Containerfile --target collector -t localhost/tidepool-collector:latest .
+#   podman build -f deploy/oci/Containerfile --target api       -t localhost/tidepool-api:latest .
+#   podman build -f deploy/oci/Containerfile --target scheduler -t localhost/tidepool-scheduler:latest .
+#   podman build -f deploy/oci/Containerfile --target utility   -t localhost/tidepool-utility:latest .
+
+# --------------------------------------------------------------------- build
+FROM docker.io/library/node:22-bookworm-slim AS build
+WORKDIR /src
+
+# dependency layers first for cache efficiency
+COPY package.json package-lock.json ./
+COPY server/package.json server/package-lock.json ./server/
+COPY web/package.json web/package-lock.json ./web/
+RUN npm ci --no-audit --no-fund \
+ && npm ci --prefix server --no-audit --no-fund \
+ && npm ci --prefix web --no-audit --no-fund
+
+COPY shared ./shared
+COPY server ./server
+COPY web ./web
+RUN npm run build \
+ && npm ci --prefix server --omit=dev --no-audit --no-fund
+
+# ---------------------------------------------------------------------- base
+# Shared runtime: node + compiled server + production deps + migrations.
+# No shell tooling is added; the base image of node:22-bookworm-slim does
+# contain /bin/sh (Debian), so interactive/shell execution is denied by the
+# AppArmor profiles and the containers never require one.
+FROM docker.io/library/node:22-bookworm-slim AS base
+ENV NODE_ENV=production \
+    # canonical in-container layout, mirroring the host bind mounts 1:1 so
+    # that AppArmor paths, documentation, and host paths all read the same
+    TIDEPOOL_ROOT=/app \
+    TIDEPOOL_CONFIG=/var/lib/tidepool/config/tidepool.config.json \
+    TIDEPOOL_DATA_DIR=/var/lib/tidepool/corpus \
+    TIDEPOOL_CACHE_DIR=/var/lib/tidepool/corpus/cache \
+    NODE_OPTIONS=--disable-warning=ExperimentalWarning
+WORKDIR /app
+# fixed unprivileged identity; matches install.sh's chown of the bind mounts
+RUN groupadd -g 10001 tidepool && useradd -r -u 10001 -g 10001 -d /app -s /usr/sbin/nologin tidepool \
+ && mkdir -p /var/lib/tidepool
+COPY --from=build /src/server/dist          ./server/dist
+COPY --from=build /src/server/node_modules  ./server/node_modules
+COPY --from=build /src/server/migrations    ./server/migrations
+COPY --from=build /src/server/package.json  ./server/package.json
+USER 10001:10001
+# no ENTRYPOINT here: each target pins its exact process
+
+# ----------------------------------------------------------------- collector
+# The only image that verifies signatures, so the only one that carries gpgv.
+# Keyrings are NOT baked in: they are host-owned trust anchors bind-mounted
+# read-only at /var/lib/tidepool/keyrings (see quadlet + install.sh).
+FROM base AS collector
+USER 0
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends gpgv \
+ && rm -rf /var/lib/apt/lists/*
+USER 10001:10001
+CMD ["node", "server/dist/server/src/services/collector.js"]
+
+# ----------------------------------------------------------------------- api
+# Adds the built frontend; carries no gpgv and no keyrings.
+FROM base AS api
+ENV TIDEPOOL_WEB_DIST=/app/web/dist
+COPY --from=build /src/web/dist ./web/dist
+EXPOSE 8747
+CMD ["node", "server/dist/server/src/services/api.js"]
+
+# ------------------------------------------------------------------ scheduler
+# Base as-is: it owns no data and fetches nothing — it only dials the
+# collector's pod-internal control endpoint.
+FROM base AS scheduler
+CMD ["node", "server/dist/server/src/services/scheduler.js"]
+
+# -------------------------------------------------------------------- utility
+# Operator tooling: dispatch analysis and corpus export/import/status.
+# Run ad hoc (never a long-lived service):
+#   podman run --rm -v tidepool-corpus:/var/lib/tidepool/corpus \
+#     localhost/tidepool-utility \
+#     node server/dist/server/src/cli/dispatch.js --snapshot latest \
+#       --store /var/lib/tidepool/corpus /project
+FROM base AS utility
+CMD ["node", "server/dist/server/src/cli/corpus.js", "status", "--data", "/var/lib/tidepool/corpus"]

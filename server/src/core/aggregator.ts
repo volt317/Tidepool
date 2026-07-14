@@ -110,18 +110,39 @@ export class Aggregator {
   private states = new Map<string, UnitState>();
   private disk: DiskCache;
   private config: TidepoolConfig;
+  /** Whether this instance is allowed to perform upstream collection.
+   *  The API service runs with collect=false: sync() then answers only from
+   *  the shared disk cache (written by the collector) and NEVER fetches.
+   *  Deployment-split addition; defaults to true, so the single-process
+   *  development mode and all existing callers are unchanged. */
+  private collect: boolean;
 
   readonly store: ObservationStore;
 
-  constructor(providers: UnitProvider[], disk: DiskCache, config: TidepoolConfig, store: ObservationStore) {
+  constructor(
+    providers: UnitProvider[],
+    disk: DiskCache,
+    config: TidepoolConfig,
+    store: ObservationStore,
+    opts: { collect?: boolean } = {}
+  ) {
     this.disk = disk;
     this.config = config;
     this.store = store;
+    this.collect = opts.collect !== false;
     for (const p of providers) this.providers.set(key(p.domain, p.id), p);
   }
 
   allProviders(): UnitProvider[] {
     return [...this.providers.values()];
+  }
+
+  /** Number of units currently syncing — used by the collector service to
+   *  complete in-flight observations before shutting down. (Additive.) */
+  busy(): number {
+    let n = 0;
+    for (const st of this.states.values()) if (st.status === "syncing") n++;
+    return n;
   }
 
   /** Current state without EVER fetching: memory if ready, else disk cache
@@ -287,6 +308,20 @@ export class Aggregator {
     const st = this.states.get(k) ?? blank();
     if (st.status === "syncing") return st;
     this.states.set(k, st);
+
+    // collect=false (API service): answer from whatever the collector has
+    // written to the shared disk cache — ignoring TTL, because staleness is
+    // the collector/scheduler's problem — and never touch the network.
+    if (!this.collect) {
+      const seen = this.peek(p);
+      if (seen) {
+        Object.assign(st, seen);
+        return st;
+      }
+      st.status = "error";
+      st.error = "not yet collected — this service does not perform upstream collection";
+      return st;
+    }
 
     if (!opts.force) {
       const cached = this.disk.get<IndexCachePayload>(`index-${k}`, this.indexTtl());
