@@ -5,18 +5,24 @@ durable evidence, and lets projects be judged against that evidence — even
 offline:
 
 ```sh
-# 1. observe: sync a unit; every source becomes immutable observations
-curl -X POST localhost:8747/api/domains/code/units/npm/sync
+# 1. observe: collect every configured unit; every source becomes
+#    immutable observations (admin CLI → collector control socket)
+npm run admin sync-all
 
 # 2. bound: build a snapshot — historical reconstruction at a time boundary
-curl -X POST localhost:8747/api/snapshots \
-  -H 'content-type: application/json' -d '{"stage":"interpretive"}'
+npm run admin snapshot interpretive 168
 
 # 3. dispatch: evaluate a local project against that snapshot, offline
 node server/dist/server/src/cli/dispatch.js --snapshot <digest> ./my-service
 ```
 
     observed inflow → bounded snapshot → offline project dispatch finding
+
+Administration goes over a local Unix socket, never the web API — in the
+deployed appliance the browser-facing service is read-only and cannot
+trigger collection (its sync/snapshot routes answer 405 by design). The
+single-process development mode (`npm start`) still accepts the same
+operations as HTTP POSTs for convenience.
 
 (`examples/` holds a small deterministic snapshot + dispatch artifact
 produced by this exact pipeline; `docs/adr/` records the architecture
@@ -69,8 +75,10 @@ version, and a content address of the normalized records (stored once —
 identical re-observations cost one log line, not a copy). Consecutive
 observations of a source are diffed deterministically into **ChangeRecords**
 (package-added/removed, version-moved, metadata-changed, advisory-published/
-modified/withdrawn, source-failure/recovery, verification/signer transitions),
-each naming the observation pair it came from. Heuristic rules
+modified/withdrawn, source-failure/recovery, verification/signer transitions,
+and evidence-observed/changed/no-longer-observed for enrichment surfaces —
+explicit-scope evidence never claims withdrawal), each naming the observation
+pair it came from. Heuristic rules
 (`inflow.release-burst`, `inflow.security-burst`, `inflow.corrective-release`,
 `inflow.source-degradation`, `inflow.signer-transition`) read that history and
 emit findings with rule ids, confidence basis, evidence references, and their
@@ -115,9 +123,15 @@ in `server/src/core/aggregator.ts`:
 ```
 syncIndex()  →  rows with per-source versions   (sources never blended)
 syncAdvisories()  →  advisories joined by name
-disk cache (TTL'd)  →  summaries: current version (dpkg compare), drift,
-advisory counts  →  search / filter / pagination  →  on-demand enrichment
+observation store (SQLite)  →  summaries: current version (dpkg compare),
+drift, advisory counts  →  search / filter / pagination  →  stored evidence
 ```
+
+The collector keeps a TTL'd disk cache as a *private* optimization — in the
+deployed appliance nothing else reads it, and the API reconstructs the same
+summaries from the atomically published SQLite read replica (deleting the
+cache changes nothing the API serves; that property is verified in CI). In
+single-process development mode the in-memory state serves directly.
 
 A domain implements only the `UnitProvider` seam — how to enumerate and
 verify its sources. The distro domain's providers are apt pockets, Alpine
@@ -145,10 +159,15 @@ detection, advisory joins, caching, the API, and the console.
   Arch's AVG feed are joined by package name; Debian uses OSV per package on
   demand. Advisory counts appear in the table; details, CVEs, and fixed
   versions in the package drawer.
-- **On-demand upstream enrichment.** Opening a package queries OSV for the
-  unit's ecosystem (full count via `querybatch`, details for the newest
-  few), plus endoflife.date lifecycle and GitHub releases for packages mapped
-  in `packageHints` — each panel with its own status and endpoint.
+- **Enrichment as evidence.** OSV per-package detail, endoflife.date
+  lifecycle, and GitHub releases (for packages mapped in `packageHints`) are
+  collected by the collector — on bounded policy ("packages that changed in
+  the last window"), on schedule, or on explicit `npm run admin enrich` —
+  and recorded as immutable *evidence observations* like every other source,
+  with their own change kinds and coverage rows in snapshots. The package
+  drawer serves the stored evidence; a UI click never silently creates an
+  upstream query. (Dev mode keeps live on-open enrichment, which is likewise
+  recorded.)
 
 ## The code-ecosystem domain
 
@@ -221,10 +240,20 @@ files onto the host and point `index.keyrings` at them.
 tidepool.config.json          everything the service does is declared here
 shared/types.ts               the typed API contract (server implements, web consumes)
 server/src/
-  index.ts                    thin bootstrap: config → providers → core → routes
+  index.ts                    single-process dev mode: config → providers →
+                              core → composed routes
+  services/                   the appliance: collector.ts (writer + control
+                              socket + replica publication), api.ts (replica
+                              reads), scheduler.ts, proxy.ts, ipc.ts (JSON
+                              over Unix sockets), bootstrap.ts
+  cli/                        dispatch.ts, corpus.ts, admin.ts (control
+                              socket operations), retention.ts
   core/aggregator.ts          the contained flow: sync, cache, summaries, drift,
-                              enrichment — domain-agnostic
-  core/routes.ts              /api/domains/:domain/units/:unit/… (symmetric)
+                              enrichment-as-evidence — domain-agnostic
+  core/readmodel.ts           UnitState reconstruction from the published
+                              replica (what the deployed API serves)
+  core/routes.ts              dev composition of routes.read.ts +
+                              routes.control.ts (symmetric across domains)
   core/enrich.ts              shared OSV / endoflife / GitHub adapters + OSV batch join
   lib/util.ts                 fetch/gzip/sha256, deb822 parsing, dpkg version
                               compare, ustar reader, disk cache
@@ -257,14 +286,60 @@ npm run lint              # eslint (flat config) — must be clean
 npm run dev:server        # compiles server, API on :8747
 npm run dev:web           # Vite on :5173, proxies /api → :8747
 
-# production (single process: API + built frontend)
+# production, single process (API + built frontend + live control routes)
 npm run build             # tsc → server/dist, vite → web/dist
 npm start                 # http://localhost:8747 (run from the repo root)
+
+# production, isolated appliance (the deployed form — see deploy/README.md)
+./deploy/scripts/install.sh   # digest-pinned builds, immutable tags,
+                              # rendered Quadlet units, printed root steps
+systemctl --user start tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler
 ```
 
 The entire codebase is TypeScript against the shared contract in
 `shared/types.ts`. `npm run lint` and `npm run typecheck` pass with zero
 findings and are the gate for any change.
+
+## Deployment: the isolated appliance
+
+The deployed form (`deploy/`) runs four independent rootless Podman
+containers with one governing invariant: **the collector is the only
+Tidepool process permitted to access the Internet.**
+
+```
+collector   sole Internet egress · sole corpus writer · publishes an
+            atomically replaced read-only SQLite replica · control surface
+            is a Unix socket (run/collector-control.sock) — no TCP at all
+api         --network=none · reads the published replica SQLITE_OPEN_READONLY
+            plus objects/ and snapshots/ read-only · the writer directory is
+            absent from its mount namespace · listens on a Unix socket
+proxy       the only published TCP port (127.0.0.1:8747 by default) · holds
+            no data · forwards to the API's socket with size/time limits
+scheduler   --network=none · drives collection/snapshot/verification/
+            enrichment cadence from the validated config over the socket
+dispatch    ad-hoc jobs, --network=none, read-only project mounts
+```
+
+Each service has its own AppArmor profile (seven ship, including
+corpus-export/import for backup tooling), and a host nftables policy
+(`deploy/nftables/tidepool.nft`) narrows the collector to DNS + 443 —
+required, not optional, on hostile networks. Manual operations go through
+the admin CLI over the control socket:
+
+```sh
+npm run admin health | sync-all | snapshot | publish | enrich <d> <u> <pkg>
+npm run retention plan          # reachability-based pruning, dry-run default
+~/.local/share/tidepool/bin/verify.sh              # positive checks
+~/.local/share/tidepool/bin/boundaries-verify.sh   # negative checks: ~20
+                                                   # prohibited operations
+                                                   # attempted for real
+```
+
+Every isolation claim, the layer that enforces it, and the two honest
+limitations (per-user rootless egress; description-less replica listings)
+are tabled in `deploy/README.md`; ADR 0008 records the reasoning. API
+availability does not depend on the collector — once a replica is
+published, reads keep working with the collector stopped.
 
 ## Testing
 
@@ -356,6 +431,17 @@ unflagged; declared in `engines`).
   switch on the corresponding enrichment panels.
 - `enrichment.githubToken` (or env `TIDEPOOL_GITHUB_TOKEN`) — raises
   api.github.com anonymous limits.
+- `scheduler` — the appliance's cadence, in the same validated document as
+  everything else: `enabled`, `collectionInterval` / `snapshotInterval` /
+  `verificationInterval` / `enrichmentInterval` (durations like `"30m"`,
+  `"6h"`, `"7d"`), `snapshotStage`, `snapshotWindowHours`. Environment
+  variables carry deployment wiring only (paths, sockets, provenance
+  identity), never behavior.
+- `maintenance` — `publishReplicaAfterCollection` (default on),
+  `enrichment.changedWindowHours` / `maxPerRun` (the bounded
+  enrich-what-changed policy), `backup.retainVerified`, and
+  `retention.enabled` (default off; retention additionally runs only via
+  its CLI).
 - Ubuntu/Debian `components` default to `["main"]`; add `"universe"` (or
   `"contrib"`, `"non-free"`) for the full archive — bigger sync, same code
   paths.
@@ -367,12 +453,20 @@ Domain-symmetric by construction — the same routes serve both domains:
 ```
 GET  /api/config
 GET  /api/domains                                        domains → units → per-source health
-POST /api/domains/:domain/units/:unit/sync               force re-sync
 GET  /api/domains/:domain/units/:unit/packages?q=&page=&per=&advisories=1&drift=1
 GET  /api/domains/:domain/units/:unit/packages/:name     all sources + joined advisories
-GET  /api/domains/:domain/units/:unit/packages/:name/enrich
+GET  /api/domains/:domain/units/:unit/packages/:name/enrich   stored evidence
 POST /api/reload                                         re-read config
+POST /api/domains/:domain/units/:unit/sync               ┐ dev mode only —
+POST /api/snapshots                                      ┘ the deployed API
+                                                           answers 405; use
+                                                           the admin CLI or
+                                                           the scheduler
 ```
+
+In the appliance, `/enrich` returns evidence previously recorded by the
+collector (surface, observation time, items); in dev mode the same path
+performs — and records — a live bounded enrichment.
 
 ## The observation store
 
@@ -382,12 +476,23 @@ response cache (the TTL serving cache stays separate in `.cache/`, with a
 deliberately opposite contract):
 
 ```
-.tidepool/
-├── tidepool.sqlite3        WAL, synchronous=NORMAL, foreign keys ON,
-│                           busy_timeout 5s, incremental auto-vacuum
+.tidepool/                  (dev; the appliance uses $TIDEPOOL_HOME/corpus)
+├── writer/tidepool.sqlite3 the AUTHORITATIVE database — WAL,
+│                           synchronous=NORMAL, foreign keys ON, busy_timeout
+│                           5s, incremental auto-vacuum; its own directory so
+│                           read-side services can mount corpus subtrees
+│                           while the writer path stays out of their
+│                           namespaces entirely (legacy root-level databases
+│                           are relocated once at open)
 ├── objects/sha256/xx/…     content-addressed normalized record corpora
-├── snapshots/              snapshot documents (manifest rows join contents)
-├── exports/                portable evidence bundles
+├── snapshots/              snapshot documents (manifest rows join contents,
+│                           plus generator provenance: version, commit,
+│                           image/config/profile digests)
+├── exports/                portable evidence bundles, retention audits
+├── published/              tidepool-read.sqlite3 + publication.json — the
+│                           consistent replica the API serves (dev default;
+│                           its own mount in the appliance)
+├── run/                    control + api sockets, scheduler heartbeat (dev)
 └── locks/
 ```
 
@@ -423,8 +528,13 @@ validates the manifest, verifies every checksum, inspects schema
 compatibility via the migration ledger (newer schemas refused), merges
 immutable rows without ever silently replacing conflicting history, records
 the import in a ledger, and supports `--dry-run`. Retention: nothing is
-deleted by default; compaction is a documented later feature and must stay
-explicit, logged, and reversible.
+deleted by default. `npm run retention plan` computes snapshot-aware
+reachability (every snapshot's truth boundary plus each source's latest
+observation protect their referenced blobs); `apply` additionally requires
+`maintenance.retention.enabled` in the config *and* a verified backup newer
+than 24h, writes an audit record before touching anything, deletes only
+unreferenced object bytes, nulls the artifact's `storage_path` (provenance
+rows are permanent), and re-verifies the corpus afterwards.
 
 ## The corpus boundary
 
@@ -475,7 +585,7 @@ verdict interpretation (`interpretGpgvVerdict` is testable without gpg).
 | direction item | status |
 |---|---|
 | Immutable observations with full provenance fields | implemented |
-| Deterministic change detection, observation-attributed | implemented (11 change kinds) |
+| Deterministic change detection, observation-attributed | implemented (14 change kinds incl. evidence) |
 | Inflow heuristics with rule ids / confidence basis / ambiguity | implemented — 5 rules; toolchain-migration, ABI-wave, coordinated-churn, upstream-lag rules are seams on the same Rule type, not yet written |
 | Observation / churn / interpretive snapshot stages | implemented |
 | Content-addressed, schema-versioned, reproducible snapshots | implemented (digest binds content; fixed-window rebuild identity smoke-asserted) |
@@ -489,7 +599,7 @@ verdict interpretation (`interpretGpgvVerdict` is testable without gpg).
 | Historical queries + snapshot reconstruction from SQLite | implemented (9–10); old-window digest identity test-proven |
 | Backup-API export, full + thin evidence bundles, safe import | implemented (11–12) with dry-run, checksum, schema-ledger, and conflict-retention guarantees |
 | Milestone test classes 13–16 | implemented (dedup, failure/recovery, old-snapshot immutability, offline load) |
-| Evidence / relationships / finding-join tables | schema present (0002); only findings are written today (at snapshot persist) — evidence extraction is the seam |
+| Evidence / relationships / finding-join tables | findings written at snapshot persist; enrichment now writes first-class evidence *observations* (`enrich:<surface>:<subject>`, explicit-scope) served by the API and covered by snapshots |
 | Two-phase collection/analysis transactions (analysis_status, retryable) | implemented — a diffing failure never erases evidence |
 | Dual source heads (latest vs latest-successful) | implemented; staleness declared in reconstruction |
 | Native version semantics per ecosystem (`ordering: unsupported` honesty) | implemented — dpkg/apk/pacman/semver/pep440/dotted native; gems/maven/conan/vcpkg honestly unsupported |
@@ -498,7 +608,8 @@ verdict interpretation (`interpretGpgvVerdict` is testable without gpg).
 | apt raw-artifact preservation (InRelease + Packages.gz into the corpus) | implemented; other collectors' raw capture + HTTP fetch-metadata threading deferred |
 | NdjsonObservationStore parity impl | deliberately not resurrected — retired one milestone before the seam existed; the interface + SQLite impl serve the seam's purpose |
 | UI: observation timeline / entity history / truth-boundary / UnitAvailability axes | deferred (Milestone 6) |
-| Retention policies, compaction | deferred by design |
+| Isolated-appliance runtime: collector-only egress, published replica, Unix-socket control, negative boundary tests, deploy CI | implemented (ADR 0008, `deploy/`) |
+| Retention policies, compaction | reachability-based retention CLI implemented (plan/apply, audit-first, backup-gated); disabled by default and CLI-only by design |
 | "Do not restrict collection to relevance" | collection is scope-bounded by config (whole archives for distros; declared sets for registries); registry-wide enumeration remains the documented scope.mode seam |
 
 ## Known limitations
@@ -523,6 +634,11 @@ verdict interpretation (`interpretGpgvVerdict` is testable without gpg).
 - Code-unit scopes are explicit lists; registry-wide enumeration (e.g. the
   PyPI simple index's full name list) is a further `scope.mode` behind the
   same seam, not yet implemented.
+- Replica-served listings (the deployed API) carry no package description
+  text — descriptions are not part of normalized index records — and
+  advisories reconstructed from the corpus carry no click-through URL.
+  Versions, drift, components, and advisory counts/details are all present.
+  Dev mode, serving from live collection state, shows both.
 
 ## License
 
