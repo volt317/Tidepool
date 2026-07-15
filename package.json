@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Tidepool \u2014 distro-first change intelligence service (TypeScript): comprehensive per-distro package lists aggregated from each distro's information sources, GPG-verified where the distro signs.",
   "scripts": {
-    "build:server": "tsc -p server",
-    "build:web": "npm --prefix web run build",
+    "build:server": "node scripts/generate-deploy-config.mjs && tsc -p server",
+    "build:web": "npm run build --workspace web",
     "build": "npm run build:server && npm run build:web",
     "typecheck": "tsc -p server --noEmit && tsc -p web",
     "lint": "eslint .",
@@ -21,7 +21,9 @@
     "start:scheduler": "node server/dist/server/src/services/scheduler.js",
     "start:proxy": "tsx server/src/services/proxy.ts",
     "admin": "tsx server/src/cli/admin.ts",
-    "retention": "tsx server/src/cli/retention.ts"
+    "retention": "tsx server/src/cli/retention.ts",
+    "generate:deploy-config": "node scripts/generate-deploy-config.mjs",
+    "sync:locks": "./scripts/sync-component-locks.sh"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
@@ -33,5 +35,9 @@
   },
   "engines": {
     "node": ">=22.13"
-  }
+  },
+  "workspaces": [
+    "server",
+    "web"
+  ]
 }

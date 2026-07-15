@@ -267,6 +267,21 @@ server/src/
                               APKINDEX + secdb, Arch packages API + AVG, USN feed
   domains/code/surfaces.ts    crates.io / PyPI / npm dual-surface resolvers
 web/                          React + Vite console (TypeScript)
+shared/types.ts               the one contract both sides compile against
+shared/deployConfig.generated.ts  GENERATED from deploy/deploy.yaml before
+                              tsc — deploy values as static consts in
+                              compiled JS (no runtime YAML reads)
+deploy/deploy.yaml            single location for build/deploy values that
+                              multiple files must agree on (see Configuration)
+deploy/oci/Containerfile      one multi-target build: collector/api/
+                              scheduler/proxy/utility
+deploy/quadlet/templates/     Quadlet unit templates (rendered per deployment)
+deploy/apparmor/              seven per-service profiles
+deploy/nftables/              host firewall template (rendered, then adapted)
+deploy/scripts/               install/render/verify/boundaries/backup/restore
+                              + lib/deploy-config.sh (the YAML loader)
+scripts/                      generate-deploy-config.mjs (YAML → TS consts),
+                              sync-component-locks.sh (standalone lock upkeep)
 eslint.config.js              flat config: typescript-eslint + react-hooks
 ```
 
@@ -279,9 +294,8 @@ authorities.
 ## Running
 
 ```sh
-npm install               # root: TypeScript, ESLint, typescript-eslint
-npm --prefix server install
-npm --prefix web install
+npm install               # workspace root — one install covers server and
+                          # web too (npm workspaces, hoisted node_modules)
 
 npm run typecheck         # tsc across server, shared, and web — must be clean
 npm run lint              # eslint (flat config) — must be clean
@@ -303,6 +317,18 @@ systemctl --user start tidepool-collector tidepool-api tidepool-proxy tidepool-s
 The entire codebase is TypeScript against the shared contract in
 `shared/types.ts`. `npm run lint` and `npm run typecheck` pass with zero
 findings and are the gate for any change.
+
+The repository is an **npm workspace** (`server`, `web`) with a two-tier
+lock strategy, each lock with a distinct job. The root
+`package-lock.json` is the PROJECT lock: workspaces maintain exactly one,
+and it governs every developer and CI install. `server/package-lock.json`
+and `web/package-lock.json` are STANDALONE-mode locks that npm ignores
+during workspace installs — their job is the container build, where each
+runtime image runs `npm ci --omit=dev --workspaces=false` against its own
+component lock, deterministically and with no monorepo knowledge. They are
+generated, never hand-edited: `npm run sync:locks` regenerates them after
+any dependency change, and CI fails on drift (`sync-component-locks.sh
+--check`), the same discipline as `shared/deployConfig.generated.ts`.
 
 ## Deployment: the isolated appliance
 
@@ -342,6 +368,12 @@ podman build -f deploy/oci/Containerfile --target collector \
   -t localhost/tidepool-collector:0.3.0-g$(git rev-parse --short HEAD) .
 ```
 
+Every shared build/deploy value — ports, uid/gid, base image tag, data
+root — comes from **`deploy/deploy.yaml`** (its consumption rules,
+compile-time TypeScript baking included, are detailed under
+[Configuration](#configuration)); the build reads it through the same
+loader and `--build-arg` lines as everything else.
+
 Image discipline, enforced rather than suggested: the base is pinned **by
 digest** at build time (CI fails builds that used the floating tag); local
 tags are immutable (`<version>-g<commit>` — rendered units never reference
@@ -351,9 +383,12 @@ replica publication records the exact software identity that produced it;
 and `install.sh` writes the final image digests to
 `exports/image-digests-<tag>.json`. The collector image is the only one
 that adds a package (`gpgv`, for archive signature verification); the build
-stage compiles TypeScript and the frontend, and runtime stages carry only
-`server/dist`, production `node_modules`, migrations, and (API only)
-`web/dist` — the read-only root itself is the Quadlet unit's doing
+stage compiles TypeScript and the frontend after one workspace-root
+`npm ci` (the project lock), and each runtime stage carries only
+`server/dist`, migrations, (API only) `web/dist`, and a production
+`node_modules` produced by a standalone
+`npm ci --omit=dev --workspaces=false` against `server/package-lock.json` —
+the per-component lock exists precisely for that step — the read-only root itself is the Quadlet unit's doing
 (`ReadOnly=true`), so even the collector image contains nothing writable
 at runtime beyond its mounted data trees and a `noexec` tmpfs.
 
@@ -362,8 +397,11 @@ at runtime beyond its mounted data trees and a `noexec` tmpfs.
 The runtime is **rootless Podman under user-level systemd via Quadlet**
 (Podman ≥ 4.4). Units are not hand-written: `deploy/scripts/render.sh`
 renders the templates in `deploy/quadlet/templates/` with this
-deployment's data root, image tag, and listener address (refusing
-unresolved placeholders), and `install.sh` places the result in
+deployment's data root, image tag, and the `deploy/deploy.yaml`
+configurables — listener, ports, uid/gid — refusing unresolved
+placeholders, and additionally renders the host firewall policy
+(`tidepool.nft`) so its port define can never disagree with the unit's
+`PublishPort`; and `install.sh` places the result in
 `~/.config/containers/systemd/`, where the Quadlet generator turns each
 `.container` file into a systemd service:
 
@@ -393,7 +431,7 @@ AppArmor profiles and nftables rules — the printed post-install steps.
 
 Each service has its own AppArmor profile (seven ship, including
 corpus-export/import for backup tooling), and a host nftables policy
-(`deploy/nftables/tidepool.nft`) narrows the collector to DNS + 443 —
+(rendered from `deploy/nftables/tidepool.nft.in`) narrows the collector to DNS + 443 —
 required, not optional, on hostile networks. Manual operations go through
 the admin CLI over the control socket:
 
@@ -486,8 +524,19 @@ unflagged; declared in `engines`).
 
 ## Configuration
 
-`tidepool.config.json` declares everything; edit it and either restart or
-`POST /api/reload`. The shipped file is commented inline. Highlights:
+Three configuration surfaces, each with one job and a rule that keeps them
+from bleeding into each other:
+
+| Surface | Owns | Read |
+|---|---|---|
+| `tidepool.config.json` | application **behavior**: sources, scheduler cadence, maintenance policy | at service start / `POST /api/reload`, schema-validated |
+| `deploy/deploy.yaml` | build/deploy values **multiple files must agree on**: ports, uid/gid, base image, data root | shell scripts when *they* run; TypeScript **at compile time only** |
+| environment variables | deployment **wiring**: paths, socket locations, provenance identity — never behavior | at process start |
+
+### `tidepool.config.json`
+
+Declares what the appliance observes and when; edit it and either restart
+or `POST /api/reload`. The shipped file is commented inline. Highlights:
 
 - `distros[]` — enable/disable, pockets/repos/components/arch, signature and
   digest verification with keyring paths, advisory feed and its depth
@@ -516,6 +565,41 @@ unflagged; declared in `engines`).
 - Ubuntu/Debian `components` default to `["main"]`; add `"universe"` (or
   `"contrib"`, `"non-free"`) for the full archive — bigger sync, same code
   paths.
+
+### `deploy/deploy.yaml`
+
+The single location for values that would otherwise drift across files —
+before it existed the proxy port lived in eight places, the container uid
+in six. Current contents: `base_image` (tag; builds pin its *digest*),
+`image_prefix`, `listen_addr` / `listen_port` (the appliance's one
+published listener), `internal_port`, `container_uid` / `container_gid`,
+and `data_root` (the `$TIDEPOOL_HOME` default).
+
+How it is consumed — deliberately never by a running service:
+
+- **Shell** (`render.sh`, `install.sh`, `pin-base.sh`, backup/restore/
+  verify, CI) sources `deploy/scripts/lib/deploy-config.sh`, a
+  dependency-free flat-YAML parser, when those scripts are invoked.
+  Precedence: environment variable > `deploy.yaml` > built-in fallback, so
+  `LISTEN_PORT=9000 ./deploy/scripts/install.sh` works for one-off runs and
+  a missing file degrades to the historical defaults. `install.sh` copies
+  the YAML next to the installed operator scripts so both read one truth.
+- **TypeScript** consumes it at **compilation**: `npm run build:server`
+  first runs `scripts/generate-deploy-config.mjs`, which bakes the values
+  into the committed `shared/deployConfig.generated.ts`; the compiled
+  services carry them as static consts and never open the YAML at runtime.
+- **Everything downstream is rendered from it**: the Quadlet units'
+  `PublishPort`/uid mappings and the nftables `proxy_port` define come out
+  of the same render pass, so they cannot disagree with each other or with
+  the compiled fallbacks.
+
+Editing a value means: change the YAML, `npm run generate:deploy-config`
+(or just build), re-render/re-install, commit — and two CI gates fail
+anything stale (`generate-deploy-config.mjs --check`, plus the unit
+renderer refusing unresolved placeholders). The scope rule is stated in
+the file's header: values with an existing authoritative home —
+application behavior, the release version in `package.json`, per-service
+resource limits in the unit templates — are *not* duplicated into it.
 
 ## API
 

@@ -57,15 +57,23 @@ WORKDIR /src
 COPY package.json package-lock.json ./
 COPY server/package.json server/package-lock.json ./server/
 COPY web/package.json web/package-lock.json ./web/
-RUN npm ci --no-audit --no-fund \
- && npm ci --prefix server --no-audit --no-fund \
- && npm ci --prefix web --no-audit --no-fund
+# workspace root install: one lock, all components, hoisted — this is the
+# BUILD toolchain (tsc, vite, types); the runtime images never see it
+RUN npm ci --no-audit --no-fund
 
 COPY shared ./shared
 COPY server ./server
 COPY web ./web
+# the build regenerates shared/deployConfig.generated.ts from deploy.yaml —
+# the generator and its source must exist in the build context
+COPY scripts ./scripts
+COPY deploy/deploy.yaml ./deploy/deploy.yaml
 RUN npm run build \
- && npm ci --prefix server --omit=dev --no-audit --no-fund
+ # runtime node_modules: a STANDALONE production install against the
+ # component's own lock (server/package-lock.json) — deterministic with no
+ # monorepo knowledge; --workspaces=false keeps npm from resolving against
+ # the workspace root. This is the per-component lock's entire job.
+ && cd server && npm ci --omit=dev --workspaces=false --no-audit --no-fund
 
 # ---------------------------------------------------------------------- base
 # Shared runtime: node + compiled server + production deps + migrations.
