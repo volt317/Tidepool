@@ -12,27 +12,30 @@ on:
 permissions:
   contents: read
 
+# JavaScript-based Actions run on the Node 24 runtime where supported.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   lint:
-    name: eslint + typecheck (node ${{ matrix.node }})
+    name: eslint + typecheck (Node 24)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: ${{ matrix.node }}
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: |
             package-lock.json
             server/package-lock.json
             web/package-lock.json
 
+
+      - name: verify Node 24 runtime
+        run: node scripts/assert-node24.mjs
       - name: Install (root tooling, server, web)
         run: |
           npm ci   # workspace root install: server + web, hoisted, one lock

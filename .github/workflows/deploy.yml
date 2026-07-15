@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+# JavaScript-based Actions run on the Node 24 runtime where supported.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   deploy-test:
     runs-on: ubuntu-latest
@@ -28,11 +32,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+
+      - name: verify Node 24 runtime
+        run: node scripts/assert-node24.mjs
+
       - name: install host tooling (podman, apparmor, shellcheck)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq podman apparmor apparmor-utils shellcheck
           podman info --format 'podman {{.Version.Version}} rootless={{.Host.Security.Rootless}}'
+
+      - name: verify required npm scripts are present (clear error on drift)
+        run: node scripts/assert-scripts-present.mjs check:deploy-config check:locks
 
       - name: verify generated deploy config is in sync with deploy/deploy.yaml
         run: npm run check:deploy-config

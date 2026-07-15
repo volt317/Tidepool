@@ -36,7 +36,7 @@
 # ---------------------------------------------------------------- images
 # Base image TAG; pin-base.sh resolves it to a digest at build time — the
 # digest, not this tag, is what builds actually use.
-base_image: docker.io/library/node:22-bookworm-slim
+base_image: docker.io/library/node:24-bookworm-slim
 # Local image name prefix; tags are <prefix>-<target>:<version>-g<commit>.
 image_prefix: localhost/tidepool
 

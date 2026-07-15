@@ -14,26 +14,29 @@ on:
 permissions:
   contents: read
 
+# JavaScript-based Actions run on the Node 24 runtime where supported.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   test:
-    name: unit tests + coverage (node ${{ matrix.node }})
+    name: unit tests + coverage (Node 24)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: ${{ matrix.node }}
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: |
             package-lock.json
             server/package-lock.json
 
+
+      - name: verify Node 24 runtime
+        run: node scripts/assert-node24.mjs
       - name: Install
         run: |
           npm ci   # workspace root install: server + web, hoisted, one lock
@@ -42,7 +45,6 @@ jobs:
         run: npm run test:coverage
 
       - name: Upload lcov
-        if: matrix.node == 24
         uses: actions/upload-artifact@v4
         with:
           name: coverage-lcov

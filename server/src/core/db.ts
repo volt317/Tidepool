@@ -40,7 +40,7 @@ interface SqliteModule {
 
 export function sqliteModule(): SqliteModule {
   const mod = process.getBuiltinModule?.("node:sqlite") as unknown as SqliteModule | undefined;
-  if (!mod) throw new Error("the observation store requires node:sqlite (Node >= 22.13)");
+  if (!mod) throw new Error("the observation store requires node:sqlite (Node >= 24)");
   return mod;
 }
 

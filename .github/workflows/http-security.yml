@@ -1,0 +1,51 @@
+# .github/workflows/http-security.yml
+#
+# The HTTP-layer gate: generates a temporary local CA + server certificate,
+# starts the API (Unix socket) and the proxy (HTTPS), and asserts the
+# strict-admission contract end to end — route manifest, method/body/query/
+# framing rejection (including raw-socket smuggling-style tests over TLS),
+# security headers, per-route caching, TLS version policy, CA-private-key
+# confinement, and stable API-down behavior. See
+# deploy/scripts/http-security-test.sh for the full assertion list.
+name: http-security
+on:
+  push:
+    branches: [main]
+    paths: ["server/**", "shared/**", "deploy/scripts/http-security-test.sh", ".github/workflows/http-security.yml"]
+  pull_request:
+    paths: ["server/**", "shared/**", "deploy/scripts/http-security-test.sh", ".github/workflows/http-security.yml"]
+
+permissions:
+  contents: read
+
+# JavaScript-based Actions run on the Node 24 runtime where supported.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  http-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+
+
+      - name: verify Node 24 runtime
+        run: node scripts/assert-node24.mjs
+      - name: install dependencies
+        run: npm ci   # workspace root install: server + web, hoisted, one lock
+
+      - name: build server (regenerates deploy-config, then tsc)
+        run: npm run build:server
+
+      - name: openssl + curl available
+        run: openssl version && curl --version | head -1
+
+      - name: admission-engine + TLS unit tests
+        run: node --test --enable-source-maps 'server/dist/server/test/http-admission.test.js' 'server/dist/server/test/tls.test.js'
+
+      - name: HTTP security end-to-end (route manifest, framing, TLS, CA-key confinement)
+        run: ./deploy/scripts/http-security-test.sh

@@ -23,7 +23,7 @@ _dc_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _dc_caller_dir="$(cd "$(dirname "${BASH_SOURCE[1]:-$0}")" && pwd)"
 
 # fallbacks = the values that were hardcoded before deploy.yaml existed
-DEPLOY_CFG_BASE_IMAGE="docker.io/library/node:22-bookworm-slim"
+DEPLOY_CFG_BASE_IMAGE="docker.io/library/node:24-bookworm-slim"
 DEPLOY_CFG_IMAGE_PREFIX="localhost/tidepool"
 DEPLOY_CFG_LISTEN_ADDR="127.0.0.1"
 DEPLOY_CFG_LISTEN_PORT="8747"

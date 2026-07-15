@@ -9,7 +9,7 @@
 
 export const DEPLOY_CONFIG = {
   /** deploy.yaml: base_image */
-  baseImage: "docker.io/library/node:22-bookworm-slim",
+  baseImage: "docker.io/library/node:24-bookworm-slim",
   /** deploy.yaml: container_gid */
   containerGid: 10001,
   /** deploy.yaml: container_uid */
