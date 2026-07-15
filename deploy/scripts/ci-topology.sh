@@ -17,6 +17,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/deploy-config.sh
 source "$HERE/lib/deploy-config.sh"
+deploy_config_refuse_root
 
 MODE="${1:?usage: ci-topology.sh up <image-tag> | down}"
 : "${TIDEPOOL_HOME:?TIDEPOOL_HOME must be exported}"

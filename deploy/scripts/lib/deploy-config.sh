@@ -67,3 +67,17 @@ else
 fi
 
 unset _dc_lib_dir _dc_caller_dir _dc_file _dc_line _dc_key _dc_val
+
+# Refuse to operate as root. The appliance is rootless by design: the data
+# root is the APPLIANCE USER's XDG data dir, and a root invocation (sudo'd
+# script, root cron) would silently build a parallel tree under
+# /root/.local/share/tidepool instead of touching the real one. Scripts that
+# read or write the data root call this; deliberate root-managed layouts can
+# set TIDEPOOL_ALLOW_ROOT=1 together with an explicit TIDEPOOL_HOME.
+deploy_config_refuse_root() {
+  if [ "$(id -u)" -eq 0 ] && [ "${TIDEPOOL_ALLOW_ROOT:-0}" != "1" ]; then
+    echo "refusing to run as root: the appliance is rootless, and ~ would resolve to /root, creating a parallel data tree." >&2
+    echo "run as the appliance user — or, for a deliberate root-managed layout, set TIDEPOOL_ALLOW_ROOT=1 and an explicit TIDEPOOL_HOME." >&2
+    exit 1
+  fi
+}

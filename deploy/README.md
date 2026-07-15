@@ -46,7 +46,11 @@ listed here is a convention, not a guarantee.
 | API cannot touch the authoritative DB | writer directory absent from its mount namespace **and** AppArmor `deny /var/lib/tidepool/corpus/writer/** ` by name **and** its only DB connection is `SQLITE_OPEN_READONLY` against the replica |
 | API cannot write published/objects/snapshots | `:ro` mounts **and** AppArmor read-only rules |
 | Collector accepts no inbound TCP | no `PublishPort` in its unit (verified: `podman port` empty) — its control surface is a Unix socket, mode 0660 |
-| Proxy holds no data | only `run/` and `config/` exist in its mount namespace; AppArmor denies the rest by name |
+| Proxy holds no data | only `run/`, `config/`, and `tls/server/` exist in its mount namespace; AppArmor denies the rest by name |
+| Only declared HTTP requests reach the API | proxy admission gate: deny-by-default route manifest, method/body/query/framing checks (`shared/httpPolicy.ts`) — anything unlisted is 404/405, mutation verbs never appear |
+| HTTP mutation is impossible in appliance mode | the manifest omits mutation routes **and** the API independently 405s every non-GET/HEAD (defense in depth) |
+| Proxy never holds the CA private key | only `tls/server/` (cert+key+chain) is mounted; `tls/ca/` is not, and AppArmor `deny /var/lib/tidepool/tls/ca/**` — `boundaries-verify.sh` and `tls verify` both assert it |
+| TLS is modern | proxy sets `minVersion: TLSv1.2`; the http-security job asserts TLS 1.0/1.1 rejected, 1.2/1.3 accepted |
 | Only node executes (any container) | AppArmor `deny …sh x`, `deny /usr/bin/** x` (collector additionally allows `gpgv`) |
 | Collection can't be triggered from the API | the API has no route to the control socket in code, and answers 405; control requires filesystem access to the socket (admin CLI or scheduler) |
 | Collector egress limited to DNS+443 | **host nftables** (rendered `tidepool.nft`) — a REQUIRED layer on hostile networks, because rootless egress is user-level traffic |
@@ -64,6 +68,18 @@ Two honest limitations worth knowing before deployment:
   the corpus carry no click-through URL.
 
 ## Host layout (`$TIDEPOOL_HOME`, default `~/.local/share/tidepool`)
+
+Why a per-user folder and not `/var/lib`: the appliance is **rootless end
+to end** — per-user Podman image storage, user-level systemd units, per-user
+subuid mappings — so the data root is the *appliance user's* XDG data dir,
+owned and operated without a privileged installer. `/var/lib/tidepool`
+exists only as the fixed **in-container** mount target, deliberately
+decoupled from wherever the host keeps the data. Run Tidepool under a
+dedicated unprivileged account (the nftables policy already assumes one);
+every script that touches the data root refuses to run as root, because a
+sudo'd invocation would silently resolve `~` to `/root` and build a
+parallel tree (`TIDEPOOL_ALLOW_ROOT=1` plus an explicit `TIDEPOOL_HOME`
+exists for deliberate root-managed layouts).
 
 ```
 config/      tidepool.config.json        — ONE validated document: sources,
@@ -203,6 +219,79 @@ that fails verification deletes itself and fails the unit. Restore
 dry-runs first, imports transactionally, verifies the corpus, and publishes
 a fresh replica so the API serves restored truth immediately.
 
+## HTTP admission and self-managed TLS
+
+The proxy is the appliance's sole TCP endpoint and its HTTP admission gate.
+It owns exactly one layer of the stack:
+
+```
+host firewall / netns   who can reach the port        (not the proxy)
+AppArmor / mounts       process + filesystem authority (not the proxy)
+>>> proxy: HTTP admission — is this a valid Tidepool request?
+API over Unix socket    application semantics          (downstream)
+```
+
+The proxy makes **no claim about packets** — the firewall and network
+namespaces remain the source of truth for reachability. The proxy decides,
+for a connection that already arrived, whether it is a structurally and
+semantically valid request: it terminates TLS, checks framing, matches the
+request against a versioned deny-by-default route manifest
+(`shared/httpPolicy.ts`), strips client forwarding headers, sets security
+headers, and forwards only admitted GET/HEAD requests to the API's Unix
+socket. Administration is never on this surface — mutation verbs return
+405, and collection/enrichment stay on the control socket.
+
+What the gate rejects (each with a stable, non-disclosing error body):
+unknown routes (404), disallowed methods (405), request bodies on read
+routes (413), unknown/duplicate/oversized query parameters (400/414),
+duplicate `Host`/`Content-Length`, `Content-Length`+`Transfer-Encoding`,
+obsolete line folding, control characters, path traversal, and malformed
+percent-encoding (400, connection closed on framing ambiguity). Responses
+carry a strict CSP (`default-src 'none'`), `nosniff`, `X-Frame-Options:
+DENY`, no `Server`/`X-Powered-By`, and per-route caching (immutable for
+hashed assets and content-addressed snapshots, `no-store` for current
+state). CORS is disabled by default.
+
+### TLS setup
+
+TLS is self-managed: a Tidepool-owned local CA issues short-lived server
+certificates. The CA private key lives host-side under
+`$TIDEPOOL_HOME/tls/ca/` at 0600 and is **never mounted into the proxy** —
+the proxy receives only `tls/server/` (cert + key + chain).
+
+```sh
+npm run tls init                      # create the local CA + server cert
+npm run tls inspect                   # subject/issuer/SAN/serial/fingerprint/expiry
+npm run tls verify                    # key/cert match, chain, SAN, expiry, perms,
+                                      # and CA-key-absence-from-server-dir
+npm run tls export-ca > tidepool-ca.crt   # the CA CERTIFICATE only, for clients
+npm run tls renew                     # reissue the server cert (atomic swap),
+                                      # then: systemctl --user restart tidepool-proxy
+```
+
+Certificate modes (`http.tls.mode`): `generated-local-ca` (default for
+LAN — one CA to trust on clients), `generated-self-signed` (testing; each
+client trusts the leaf), `provided` (mount an externally managed cert), and
+`disabled` (plaintext — dev only). Keys default to ECDSA P-256 (Ed25519 and
+RSA-3072 are selectable); server lifetime defaults to 120 days, the CA to
+four years.
+
+**Installing the CA on LAN clients** (Tidepool never touches client trust
+stores — you export, you choose where to trust):
+
+- Debian/Ubuntu: `sudo cp tidepool-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`
+- Fedora: `sudo cp tidepool-ca.crt /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust`
+- Alpine: `sudo cp tidepool-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`
+- Firefox: Settings → Privacy & Security → Certificates → View Certificates → Authorities → Import
+- Chromium: Settings → Privacy and security → Security → Manage certificates → Authorities → Import
+- CLI tools: point at the file, e.g. `curl --cacert tidepool-ca.crt https://tidepool.home.arpa:8747/`
+
+### Health endpoints
+
+The proxy answers `/health/live` (process up) and `/health/ready`
+(published replica present + API socket reachable) itself — these are never
+forwarded. `/healthz` and `/api/*` are forwarded to the API.
+
 ## Verification
 
 `verify.sh` — positive: units active, containers healthy, proxy answers,
@@ -225,7 +314,11 @@ all five image builds, **no npm/compilers in any runtime image**
 ships), immutable-tag validation, AppArmor compile+load, Quadlet render and
 generator dry-run, then one live topology session for the negative boundary
 suite, backup → clean-corpus restore → verify, and API availability with
-the collector stopped. `deploy.yml` runs the integrated 19-step
+the collector stopped. `http-security.yml` is a focused gate: it generates a temporary local CA,
+starts the API and HTTPS proxy, and runs the admission matrix, security
+headers, TLS version policy, raw-socket smuggling-style framing tests, and
+CA-private-key confinement (`deploy/scripts/http-security-test.sh`, runnable
+locally). `deploy.yml` runs the integrated 19-step
 `ci-deploy-test.sh` scenario weekly and on demand, adding what the gate
 doesn't repeat: snapshot creation, offline dispatch, and the
 restore-then-compare-snapshot-digests round trip.

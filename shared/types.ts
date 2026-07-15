@@ -277,6 +277,30 @@ export interface TidepoolConfig {
     snapshotStage?: SnapshotStage;
     snapshotWindowHours?: number;
   };
+  /** strict local HTTP admission + self-managed TLS (deployment evolution) */
+  http?: {
+    enabled?: boolean;
+    listenAddress?: string;
+    port?: number;
+    allowedHosts?: string[];
+    tls?: {
+      mode?: "disabled" | "generated-local-ca" | "generated-self-signed" | "provided";
+      serverNames?: string[];
+      ipAddresses?: string[];
+      renewBeforeDays?: number;
+      certLifetimeDays?: number;
+      keyAlgorithm?: "ec-p256" | "ed25519" | "rsa-3072";
+    };
+    authentication?: { mode?: "none" | "basic-over-tls" | "mtls" };
+    limits?: {
+      maxConnections?: number;
+      maxConnectionsPerClient?: number;
+      maxHeaderBytes?: number;
+      maxHeaders?: number;
+      maxQueryBytes?: number;
+      requestTimeoutMs?: number;
+    };
+  };
   maintenance?: {
     publishReplicaAfterCollection?: boolean;
     enrichment?: {

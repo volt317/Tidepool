@@ -123,6 +123,12 @@ cat <<NEXT
 3. Keyrings: copy the archive keyrings your config references into
      $TIDEPOOL_HOME/keyrings/
 
+3b. TLS (if http.tls.mode is generated-local-ca, the default for LAN use):
+     npm run tls init                     # creates the local CA + server cert
+     npm run tls export-ca > tidepool-ca.crt   # install on LAN clients
+   The CA private key stays under $TIDEPOOL_HOME/tls/ca/ and is never
+   mounted into the proxy (only tls/server/ is).
+
 4. Review, then start (independent services — no pod):
      systemctl --user start tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler
      systemctl --user enable tidepool-backup.timer tidepool-verify.timer

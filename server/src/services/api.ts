@@ -92,6 +92,20 @@ try {
 }
 
 const app = express();
+app.disable("x-powered-by"); // server disclosure: no framework identity
+// The API binds a Unix socket in appliance mode, so the only client is the
+// local proxy. Do NOT enable broad Express trust proxy; instead, trust
+// forwarding metadata ONLY when the proxy marker is present (set by our
+// proxy over the UDS, stripped from any client that tried to forge it).
+app.use((req, _res, next) => {
+  if (req.headers["x-tidepool-proxy"] !== "1") {
+    delete req.headers["x-forwarded-for"];
+    delete req.headers["x-forwarded-host"];
+    delete req.headers["x-forwarded-proto"];
+    delete req.headers["forwarded"];
+  }
+  next();
+});
 app.use(express.json({ limit: "256kb" }));
 
 const general = rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false });
@@ -169,6 +183,22 @@ const notHere = (what: string) => (_req: express.Request, res: express.Response)
 app.post("/api/domains/:domain/units/:unit/sync", notHere("collection"));
 app.post("/api/snapshots", notHere("snapshot creation"));
 
+// Independent semantic authority: the API rejects mutation methods itself,
+// not merely because the proxy manifest omits them (defense in depth —
+// acceptance criterion 12). Appliance mode is read-only over HTTP.
+app.use((req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD") return next();
+  // the two admin 405 routes below handle POST sync/snapshot messaging;
+  // everything else mutating is refused here
+  if (req.method === "POST" && (req.path === "/api/reload")) return next();
+  if (
+    req.method === "POST" &&
+    (req.path.endsWith("/sync") || req.path === "/api/snapshots")
+  ) {
+    return next(); // falls through to the explanatory 405 handlers
+  }
+  res.status(405).json({ error: { code: "METHOD_NOT_ALLOWED", message: "This interface is read-only.", requestId: req.header("x-request-id") ?? null } });
+});
 app.use("/api", (req, res, next) => current.router(req, res, next));
 
 if (process.env.TIDEPOOL_SERVE_STATIC !== "0") {

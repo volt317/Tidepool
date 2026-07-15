@@ -19,6 +19,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/deploy-config.sh
 source "$HERE/lib/deploy-config.sh"
+deploy_config_refuse_root
 
 BASE="${TIDEPOOL_HOME:-$DEPLOY_CFG_DATA_ROOT}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

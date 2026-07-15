@@ -25,6 +25,7 @@ TEMPLATES="$REPO/deploy/quadlet/templates"
 
 # shellcheck source=lib/deploy-config.sh
 source "$HERE/lib/deploy-config.sh"
+deploy_config_refuse_root
 TIDEPOOL_HOME="${TIDEPOOL_HOME:-$DEPLOY_CFG_DATA_ROOT}"
 LISTEN_ADDR="${LISTEN_ADDR:-$DEPLOY_CFG_LISTEN_ADDR}"
 LISTEN_PORT="${LISTEN_PORT:-$DEPLOY_CFG_LISTEN_PORT}"

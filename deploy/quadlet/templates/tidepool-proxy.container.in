@@ -26,6 +26,9 @@ ReadOnly=true
 Tmpfs=/tmp:rw,noexec,nosuid,size=16m
 Volume=@TIDEPOOL_HOME@/run:/var/lib/tidepool/run:rw
 Volume=@TIDEPOOL_HOME@/config:/var/lib/tidepool/config:ro
+# TLS: ONLY the server subtree (cert/key/chain), read-only. The CA private
+# key under tls/ca/ is deliberately NOT mounted — see deploy/README.md.
+Volume=@TIDEPOOL_HOME@/tls/server:/var/lib/tidepool/tls/server:ro
 
 PublishPort=@LISTEN_ADDR@:@LISTEN_PORT@:@INTERNAL_PORT@
 
@@ -42,7 +45,10 @@ Environment=TIDEPOOL_PROXY_PORT=@INTERNAL_PORT@
 Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
 Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
 
-HealthCmd=node -e "fetch('http://127.0.0.1:@INTERNAL_PORT@/healthz').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))"
+# health over the proxy's own liveness endpoint; NODE_TLS_REJECT is scoped
+# to this one probe process (the local self-signed/local-CA cert) and does
+# not affect request handling
+HealthCmd=node -e "const https=require('https');https.get({host:'127.0.0.1',port:@INTERNAL_PORT@,path:'/health/live',rejectUnauthorized:false},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 HealthInterval=30s
 HealthRetries=3
 HealthStartPeriod=15s

@@ -16,6 +16,7 @@ import type {
   SnapshotDoc,
   TidepoolConfig,
 } from "../../../shared/types.js";
+import { LIMIT_BOUNDS } from "../../../shared/httpPolicy.js";
 
 export class Ctx {
   errors: string[] = [];
@@ -223,7 +224,7 @@ function validateEcosystem(c: Ctx, v: unknown, path: string): void {
  */
 export function validateConfig(v: unknown): { config?: TidepoolConfig; errors: string[] } {
   const c = new Ctx();
-  const root = obj(c, v, "config", ["server", "distros", "ecosystems", "enrichment", "packageHints", "scheduler", "maintenance"]);
+  const root = obj(c, v, "config", ["server", "distros", "ecosystems", "enrichment", "packageHints", "scheduler", "maintenance", "http"]);
   if (!root) return { errors: c.errors };
 
   const server = obj(c, root.server ?? {}, "config.server", ["port", "cacheDir", "dataDir", "indexTtlHours", "advisoryTtlHours"]);
@@ -255,6 +256,7 @@ export function validateConfig(v: unknown): { config?: TidepoolConfig; errors: s
 
   // deployment-evolution addition: scheduler cadence + maintenance policy —
   // core application behavior belongs in this one validated document
+  if (root.http !== undefined) validateHttp(c, root.http);
   if (root.scheduler !== undefined) {
     const sch = obj(c, root.scheduler, "config.scheduler", [
       "enabled", "collectionInterval", "snapshotInterval", "verificationInterval", "enrichmentInterval", "snapshotStage", "snapshotWindowHours",
@@ -392,4 +394,71 @@ export function validateExportManifest(v2: unknown, where: string): { manifest?:
   arr(c, o.sources, `${where}.sources`);
   arr(c, o.snapshotIds, `${where}.snapshotIds`);
   return c.errors.length ? { errors: c.errors } : { manifest: o, errors: [] };
+}
+
+// ---------------------------------------------------------------- http block
+
+const HOSTNAME_RE = /^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?:\.(?!-)[a-z0-9-]{1,63})*$/i;
+const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+
+function isHostLiteral(v: string): boolean {
+  return HOSTNAME_RE.test(v) || IPV4_RE.test(v) || v === "localhost";
+}
+
+function validateHttp(c: Ctx, v: unknown): void {
+  const h = obj(c, v, "config.http", ["enabled", "listenAddress", "port", "allowedHosts", "tls", "authentication", "limits"]);
+  if (!h) return;
+  if (h.enabled !== undefined) bool(c, h.enabled, "config.http.enabled");
+  if (h.listenAddress !== undefined) {
+    const a = str(c, h.listenAddress, "config.http.listenAddress", { max: 64 });
+    if (a !== undefined && !isHostLiteral(a)) c.fail("config.http.listenAddress", "must be a hostname or IPv4 literal");
+  }
+  if (h.port !== undefined) int(c, h.port, "config.http.port", { min: 1, max: 65535 });
+  if (h.allowedHosts !== undefined) {
+    const a = arr(c, h.allowedHosts, "config.http.allowedHosts", { min: 1, max: 32 });
+    const seen = new Set<string>();
+    (a ?? []).forEach((host, i) => {
+      const hv = str(c, host, `config.http.allowedHosts[${i}]`, { max: 253 });
+      if (hv === undefined) return;
+      if (!isHostLiteral(hv)) c.fail(`config.http.allowedHosts[${i}]`, "not a valid hostname or IP literal");
+      if (seen.has(hv.toLowerCase())) c.fail(`config.http.allowedHosts[${i}]`, "duplicate host");
+      seen.add(hv.toLowerCase());
+    });
+  }
+  if (h.tls !== undefined) {
+    const t = obj(c, h.tls, "config.http.tls", ["mode", "serverNames", "ipAddresses", "renewBeforeDays", "certLifetimeDays", "keyAlgorithm"]);
+    if (t) {
+      if (t.mode !== undefined) enumOf(c, t.mode, "config.http.tls.mode", ["disabled", "generated-local-ca", "generated-self-signed", "provided"] as const);
+      if (t.keyAlgorithm !== undefined) enumOf(c, t.keyAlgorithm, "config.http.tls.keyAlgorithm", ["ec-p256", "ed25519", "rsa-3072"] as const);
+      if (t.serverNames !== undefined) {
+        const sn = arr(c, t.serverNames, "config.http.tls.serverNames", { max: 16 });
+        (sn ?? []).forEach((n, i) => {
+          const nv = str(c, n, `config.http.tls.serverNames[${i}]`, { max: 253 });
+          if (nv !== undefined && !HOSTNAME_RE.test(nv)) c.fail(`config.http.tls.serverNames[${i}]`, "invalid DNS name");
+        });
+      }
+      if (t.ipAddresses !== undefined) {
+        const ips = arr(c, t.ipAddresses, "config.http.tls.ipAddresses", { max: 16 });
+        (ips ?? []).forEach((ip, i) => {
+          const iv = str(c, ip, `config.http.tls.ipAddresses[${i}]`, { max: 45 });
+          if (iv !== undefined && !IPV4_RE.test(iv) && !iv.includes(":")) c.fail(`config.http.tls.ipAddresses[${i}]`, "invalid IP address");
+        });
+      }
+      if (t.renewBeforeDays !== undefined) int(c, t.renewBeforeDays, "config.http.tls.renewBeforeDays", { min: 1, max: 365 });
+      if (t.certLifetimeDays !== undefined) int(c, t.certLifetimeDays, "config.http.tls.certLifetimeDays", { min: 7, max: 825 });
+    }
+  }
+  if (h.authentication !== undefined) {
+    const a = obj(c, h.authentication, "config.http.authentication", ["mode"]);
+    if (a && a.mode !== undefined) enumOf(c, a.mode, "config.http.authentication.mode", ["none", "basic-over-tls", "mtls"] as const);
+  }
+  if (h.limits !== undefined) {
+    const l = obj(c, h.limits, "config.http.limits", Object.keys(LIMIT_BOUNDS));
+    if (l) {
+      for (const [key, bounds] of Object.entries(LIMIT_BOUNDS)) {
+        const val = (l as Record<string, unknown>)[key];
+        if (val !== undefined) int(c, val, `config.http.limits.${key}`, { min: bounds.min, max: bounds.max });
+      }
+    }
+  }
 }

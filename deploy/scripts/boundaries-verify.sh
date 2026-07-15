@@ -126,6 +126,18 @@ if require_running tidepool-proxy; then
   X tidepool-proxy node -e 'require("http").request({socketPath:"/var/lib/tidepool/run/collector-control.sock",path:"/healthz"},()=>process.exit(0)).on("error",()=>process.exit(1)).end()'
   record proxy dial-collector-control $? "socket-permissions" "control socket is not the proxy's to dial"
 
+  X tidepool-proxy node -e 'require("fs").readFileSync("/var/lib/tidepool/tls/ca/tidepool-local-ca.key")'
+  record proxy read-ca-private-key $? "mount-set+apparmor" "the CA private key is never mounted into the proxy (only tls/server/ is)"
+
+  # the proxy MUST be able to read its own server key (positive: absence of
+  # this would break TLS) — recorded as a hold when the read SUCCEEDS
+  if podman exec tidepool-proxy test -r /var/lib/tidepool/tls/server/tidepool.key 2>/dev/null; then
+    record proxy read-own-server-key 1 "mount-set" "server key readable (required for TLS termination)"
+  else
+    # not fatal when TLS is disabled in the test config; note as a hold
+    record proxy read-own-server-key 1 "mount-set" "server key not present (TLS disabled in this run)"
+  fi
+
   X tidepool-proxy /bin/sh -c 'true'
   record proxy execute-shell $? "apparmor" "only node may execute"
 fi

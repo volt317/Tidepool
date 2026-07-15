@@ -9,6 +9,9 @@ durable evidence, and lets projects be judged against that evidence — even
 offline:
 
 ```sh
+# 0. once: npm install && npm run build   (workspace install; compiled dist
+#    is what every entrypoint — services, CLIs — runs from)
+
 # 1. observe: collect every configured unit; every source becomes
 #    immutable observations (admin CLI → collector control socket)
 npm run admin sync-all
@@ -248,10 +251,13 @@ server/src/
                               core → composed routes
   services/                   the appliance: collector.ts (writer + control
                               socket + replica publication), api.ts (replica
-                              reads), scheduler.ts, proxy.ts, ipc.ts (JSON
-                              over Unix sockets), bootstrap.ts
+                              reads), scheduler.ts, proxy.ts (HTTPS admission
+                              gate), httpAdmission.ts (framing/route engine),
+                              tls.ts (local CA + certs), ipc.ts (JSON over
+                              Unix sockets), bootstrap.ts
   cli/                        dispatch.ts, corpus.ts, admin.ts (control
-                              socket operations), retention.ts
+                              socket operations), retention.ts, tls.ts
+                              (init/inspect/renew/export-ca/verify)
   core/aggregator.ts          the contained flow: sync, cache, summaries, drift,
                               enrichment-as-evidence — domain-agnostic
   core/readmodel.ts           UnitState reconstruction from the published
@@ -268,6 +274,8 @@ server/src/
   domains/code/surfaces.ts    crates.io / PyPI / npm dual-surface resolvers
 web/                          React + Vite console (TypeScript)
 shared/types.ts               the one contract both sides compile against
+shared/httpPolicy.ts          versioned deny-by-default HTTP route manifest
+                              (proxy + tests compile against it)
 shared/deployConfig.generated.ts  GENERATED from deploy/deploy.yaml before
                               tsc — deploy values as static consts in
                               compiled JS (no runtime YAML reads)
@@ -318,6 +326,19 @@ The entire codebase is TypeScript against the shared contract in
 `shared/types.ts`. `npm run lint` and `npm run typecheck` pass with zero
 findings and are the gate for any change.
 
+The tooling model, in one sentence: **everything executes compiled
+JavaScript from `server/dist` — services, the admin and retention CLIs,
+the proxy — and the only build-time tools are `tsc`, Vite, and plain-Node
+scripts** (no tsx/ts-node anywhere, declared or otherwise). The root
+scripts fall into four groups:
+
+| Group | Scripts |
+|---|---|
+| generated-artifact upkeep | `generate:deploy-config` / `check:deploy-config`, `sync:locks` / `check:locks` — each generator has a `check:` twin that CI runs as a drift gate |
+| build & quality | `build`, `build:server` (regenerates the deploy-config module, then `tsc`), `build:web`, `typecheck`, `lint`, `test`, `test:coverage`, `smoke` |
+| run | `dev:server`, `dev:web`, `start` (single-process), `start:collector` / `start:api` / `start:scheduler` / `start:proxy` (the appliance services, from dist) |
+| operate | `admin` (control-socket CLI), `retention` (reachability pruning) — both run from dist, so build first |
+
 The repository is an **npm workspace** (`server`, `web`) with a two-tier
 lock strategy, each lock with a distinct job. The root
 `package-lock.json` is the PROJECT lock: workspaces maintain exactly one,
@@ -327,8 +348,8 @@ during workspace installs — their job is the container build, where each
 runtime image runs `npm ci --omit=dev --workspaces=false` against its own
 component lock, deterministically and with no monorepo knowledge. They are
 generated, never hand-edited: `npm run sync:locks` regenerates them after
-any dependency change, and CI fails on drift (`sync-component-locks.sh
---check`), the same discipline as `shared/deployConfig.generated.ts`.
+any dependency change, and `npm run check:locks` is the CI drift gate —
+the same discipline as `shared/deployConfig.generated.ts`.
 
 ## Deployment: the isolated appliance
 
@@ -479,7 +500,7 @@ adapters) are exercised by the live runtime smoke in CI, not by unit tests.
 
 ## CI
 
-Four workflows under `.github/workflows/` (validated with actionlint):
+Seven workflows under `.github/workflows/` (validated with actionlint):
 
 - **lint** — ESLint + the TypeScript compiler across server, shared, and web;
   the same commands as the local gates, so CI and a checkout can never
@@ -512,6 +533,26 @@ Four workflows under `.github/workflows/` (validated with actionlint):
 Lint runs on a Node 22/24 matrix; build, smoke, and the runtime target
 Node 24 (active LTS). The service requires Node >= 22.13 (`node:sqlite`
 unflagged; declared in `engines`).
+- **appliance** — the per-change deployment gate, one named step per
+  invariant: generated deploy-config and component-lock drift checks, all
+  five OCI targets built from a digest-pinned base, **no npm or compilers
+  in any runtime image** (the runtime base deletes what node:slim ships;
+  `verify-image-contents.sh` asserts absence, not policy), immutable-tag
+  validation, AppArmor compile + kernel load, Quadlet render and generator
+  dry-run — then one live topology session (shared definition:
+  `deploy/scripts/ci-topology.sh`) for the negative boundary suite,
+  backup → clean-corpus restore → verify, and API availability with the
+  collector stopped.
+- **http-security** — generates a temporary local CA, starts the API and
+  HTTPS proxy, and asserts the admission contract: route manifest,
+  method/body/query/framing rejection (including raw-socket smuggling-style
+  tests over TLS), security headers, per-route caching, TLS 1.0/1.1
+  rejection vs 1.2/1.3 acceptance, and that the CA private key never reaches
+  the proxy. Runs locally too: `./deploy/scripts/http-security-test.sh`.
+- **deploy** — the integrated 19-step scenario (`ci-deploy-test.sh`),
+  weekly and on demand: everything the gate checks plus bounded live
+  collection, snapshot creation, offline dispatch, and the
+  restore-then-compare-snapshot-digests round trip.
 
 ## What each distro aggregates
 
@@ -557,6 +598,15 @@ or `POST /api/reload`. The shipped file is commented inline. Highlights:
   `"6h"`, `"7d"`), `snapshotStage`, `snapshotWindowHours`. Environment
   variables carry deployment wiring only (paths, sockets, provenance
   identity), never behavior.
+- `http` — the appliance's strict HTTP admission + self-managed TLS
+  (appliance mode). `enabled`, `listenAddress`/`port`, `allowedHosts`
+  (Host allowlist), a `tls` block (`mode`: `generated-local-ca` |
+  `generated-self-signed` | `provided` | `disabled`; `serverNames` /
+  `ipAddresses` become certificate SANs; `keyAlgorithm`; lifetimes),
+  `authentication.mode` (`none` | `basic-over-tls` | `mtls`), and `limits`
+  (connection/header/query bounds enforced within safe floors and ceilings).
+  Unknown keys are rejected. The proxy is a deny-by-default gate over a
+  versioned route manifest; administration never appears on the HTTP surface.
 - `maintenance` — `publishReplicaAfterCollection` (default on),
   `enrichment.changedWindowHours` / `maxPerRun` (the bounded
   enrich-what-changed policy), `backup.retainVerified`, and
@@ -594,9 +644,9 @@ How it is consumed — deliberately never by a running service:
   the compiled fallbacks.
 
 Editing a value means: change the YAML, `npm run generate:deploy-config`
-(or just build), re-render/re-install, commit — and two CI gates fail
-anything stale (`generate-deploy-config.mjs --check`, plus the unit
-renderer refusing unresolved placeholders). The scope rule is stated in
+(or just build), re-render/re-install, commit — and the CI gates fail
+anything stale (`npm run check:deploy-config`, plus the unit renderer
+refusing unresolved placeholders). The scope rule is stated in
 the file's header: values with an existing authoritative home —
 application behavior, the release version in `package.json`, per-service
 resource limits in the unit templates — are *not* duplicated into it.

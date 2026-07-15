@@ -41,6 +41,16 @@ profile tidepool-proxy flags=(attach_disconnected,mediate_deleted) {
   /var/lib/tidepool/run/ r,
   /var/lib/tidepool/run/** rw,
 
+  # TLS material: server cert + key + chain, READ-ONLY. Only the server/
+  # subtree is mounted into the proxy — the CA PRIVATE KEY lives under
+  # ca/ on the host and is never mounted here (tls verify asserts this).
+  /var/lib/tidepool/tls/server/ r,
+  /var/lib/tidepool/tls/server/tidepool.crt r,
+  /var/lib/tidepool/tls/server/tidepool.key r,
+  /var/lib/tidepool/tls/server/tidepool-chain.crt r,
+  # explicit denial of the CA private key, belt over the missing mount
+  deny /var/lib/tidepool/tls/ca/** rwklx,
+
   # no data, no trust anchors, no corpus — none of it is mounted, and the
   # profile pins that down
   deny /var/lib/tidepool/corpus/** rwklx,
