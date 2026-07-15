@@ -9,11 +9,12 @@
 # deploy/scripts/http-security-test.sh for the full assertion list.
 name: http-security
 on:
+  workflow_dispatch:
   push:
     branches: [main]
-    paths: ["server/**", "shared/**", "deploy/scripts/http-security-test.sh", ".github/workflows/http-security.yml"]
+    paths: ["server/**", "shared/**", "scripts/**", "package*.json", "package-lock.json", ".node-version", "deploy/scripts/http-security-test.sh", ".github/workflows/http-security.yml"]
   pull_request:
-    paths: ["server/**", "shared/**", "deploy/scripts/http-security-test.sh", ".github/workflows/http-security.yml"]
+    paths: ["server/**", "shared/**", "scripts/**", "package*.json", "package-lock.json", ".node-version", "deploy/scripts/http-security-test.sh", ".github/workflows/http-security.yml"]
 
 permissions:
   contents: read
@@ -28,6 +29,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: verify .node-version is present
+        run: |
+          if [ ! -f .node-version ]; then
+            echo "::error::.node-version is missing from the checked-out tree. It is the single source of truth for the CI Node version and MUST be committed alongside the workflows that reference it (node-version-file). Ensure .node-version is tracked: git add .node-version && commit."
+            exit 1
+          fi
+          echo "Node version pinned to $(cat .node-version) via .node-version"
+
       - uses: actions/setup-node@v5
         with:
           node-version-file: .node-version
