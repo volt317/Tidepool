@@ -9,16 +9,17 @@
 # permits loading profiles (CI usually does, with sudo); every step that
 # depends on an optional host facility says which guarantee it exercised.
 #
-# The 18 steps (numbered in output):
-#    1 build all OCI targets            10 verify API reads the replica
-#    2 verify base digest pinning       11 positive health tests
-#    3 compile AppArmor profiles        12 negative boundary tests
-#    4 ShellCheck deployment scripts    13 create a snapshot
-#    5 render Quadlet templates         14 offline dispatch
-#    6 validate generated units         15 create + verify a backup
-#    7 start independent containers     16 restore into a clean corpus
-#    8 bounded live collection          17 compare snapshot digests
-#    9 publish the read replica         18 stop all services cleanly
+# The 19 steps (numbered in output):
+#    1 build all OCI targets            11 positive health tests
+#    2 verify base digest pinning       12 API operation, collector STOPPED
+#    3 compile AppArmor profiles        13 negative boundary tests
+#    4 ShellCheck deployment scripts    14 create a snapshot
+#    5 render Quadlet templates         15 offline dispatch
+#    6 validate generated units         16 create + verify a backup
+#    7 start independent containers     17 restore into a clean corpus
+#    8 bounded live collection          18 compare snapshot digests
+#    9 publish the read replica         19 stop all services cleanly
+#   10 verify API reads the replica
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,46 +83,9 @@ grep -rL "Image=localhost/tidepool-.*:$IMAGE_TAG" "$WORK/rendered"/*.container |
 echo "units reference immutable tags only"
 
 step 7 "start independent containers (unit-equivalent podman run flags)"
-mkdir -p "$TIDEPOOL_HOME"/{config,keyrings,corpus,corpus/objects,corpus/snapshots,cache,published,run,backups,exports}
-cat > "$TIDEPOOL_HOME/config/tidepool.config.json" <<'CFG'
-{
-  "server": { "port": 8747, "indexTtlHours": 6 },
-  "distros": [],
-  "ecosystems": [
-    { "id": "npm-ci", "label": "npm CI watchlist", "ecosystem": "npm", "enabled": true,
-      "osvEcosystem": "npm", "scope": { "mode": "list", "packages": ["express"] } }
-  ],
-  "enrichment": { "osv": true, "endoflife": false, "github": false },
-  "scheduler": { "enabled": true, "collectionInterval": "6h", "snapshotInterval": "24h", "verificationInterval": "7d" },
-  "maintenance": { "publishReplicaAfterCollection": true, "enrichment": { "changedWindowHours": 24, "maxPerRun": 5 } }
-}
-CFG
-# shellcheck disable=SC2054  # commas here are podman flag syntax, not array separators
-COMMON=("--userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID" --read-only "--tmpfs" "/tmp:rw,noexec,nosuid" --cap-drop=all --security-opt no-new-privileges)
-V="$TIDEPOOL_HOME"
-# shellcheck disable=SC2046
-podman run -d --name tidepool-collector "${COMMON[@]}" $(AA tidepool-collector) \
-  -v "$V/config:/var/lib/tidepool/config:ro" -v "$V/keyrings:/var/lib/tidepool/keyrings:ro" \
-  -v "$V/corpus:/var/lib/tidepool/corpus:rw" -v "$V/cache:/var/lib/tidepool/cache:rw" \
-  -v "$V/published:/var/lib/tidepool/published:rw" -v "$V/run:/var/lib/tidepool/run:rw" \
-  "localhost/tidepool-collector:$IMAGE_TAG" >/dev/null
-# shellcheck disable=SC2046
-podman run -d --name tidepool-api --network=none "${COMMON[@]}" $(AA tidepool-api) \
-  -v "$V/config:/var/lib/tidepool/config:ro" -v "$V/published:/var/lib/tidepool/published:ro" \
-  -v "$V/corpus/objects:/var/lib/tidepool/corpus/objects:ro" -v "$V/corpus/snapshots:/var/lib/tidepool/corpus/snapshots:ro" \
-  -v "$V/run:/var/lib/tidepool/run:rw" \
-  "localhost/tidepool-api:$IMAGE_TAG" >/dev/null
-# shellcheck disable=SC2046
-podman run -d --name tidepool-proxy "${COMMON[@]}" $(AA tidepool-proxy) \
-  -v "$V/run:/var/lib/tidepool/run:rw" -v "$V/config:/var/lib/tidepool/config:ro" \
-  -e TIDEPOOL_PROXY_ADDR=0.0.0.0 -p "127.0.0.1:18747:$DEPLOY_CFG_INTERNAL_PORT" \
-  "localhost/tidepool-proxy:$IMAGE_TAG" >/dev/null
-# shellcheck disable=SC2046
-podman run -d --name tidepool-scheduler --network=none "${COMMON[@]}" $(AA tidepool-scheduler) \
-  -v "$V/config:/var/lib/tidepool/config:ro" -v "$V/run:/var/lib/tidepool/run:rw" \
-  "localhost/tidepool-scheduler:$IMAGE_TAG" >/dev/null
-echo "4 containers started (collector: egress netns; api+scheduler: --network=none; proxy: published 127.0.0.1:18747)"
-sleep 8
+# topology definition moved verbatim to ci-topology.sh so the explicit
+# appliance workflow and this scenario share one set of run flags
+"$HERE/ci-topology.sh" up "$IMAGE_TAG"
 
 step 8 "bounded live collection (npm registry, one package)"
 podman exec tidepool-collector node -e '
@@ -151,10 +115,21 @@ step 11 "positive health tests"
 curl -fsS http://127.0.0.1:18747/healthz | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['ok'] and d['replicaOk'];print('api healthy; publication:', d['publication']['latestObservation']['id'][:12])"
 podman exec tidepool-scheduler node -e 'const s=require("fs").statSync("/var/lib/tidepool/run/scheduler-heartbeat.json");process.exit(Date.now()-s.mtimeMs<60000?0:1)' && echo "scheduler heartbeat fresh"
 
-step 12 "negative boundary tests"
+step 12 "API operation with the collector STOPPED (availability invariant)"
+podman stop -t 20 tidepool-collector >/dev/null
+curl -fsS http://127.0.0.1:18747/healthz | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['ok'] and d['replicaOk'], 'api unhealthy without collector';print('api healthy with collector stopped')"
+curl -fsS http://127.0.0.1:18747/api/domains/code/units/npm-ci/packages | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['total']>=1;print('reads served from published truth:', d['total'], 'package(s)')"
+podman start tidepool-collector >/dev/null
+for _ in $(seq 1 30); do
+  podman exec tidepool-collector node -e 'require("http").request({socketPath:"/var/lib/tidepool/run/collector-control.sock",path:"/healthz"},r=>process.exit(r.statusCode===200?0:1)).on("error",()=>process.exit(1)).end()' 2>/dev/null && break
+  sleep 2
+done
+echo "collector restarted and healthy"
+
+step 13 "negative boundary tests"
 "$HERE/boundaries-verify.sh" --json "$WORK/boundaries.json"
 
-step 13 "create a snapshot"
+step 14 "create a snapshot"
 podman exec tidepool-collector node -e '
   const http=require("http");
   const body=JSON.stringify({stage:"interpretive",windowHours:24});
@@ -163,7 +138,7 @@ podman exec tidepool-collector node -e '
 SNAP="$(cat "$WORK/snapshot-digest")"
 echo "snapshot: $SNAP"
 
-step 14 "offline dispatch against the snapshot"
+step 15 "offline dispatch against the snapshot"
 mkdir -p "$WORK/project"
 echo '{ "name": "ci-project", "dependencies": { "express": "^5.0.0" } }' > "$WORK/project/package.json"
 # shellcheck disable=SC2046
@@ -176,12 +151,12 @@ podman run --rm --network=none $(AA tidepool-dispatch) \
     --store /var/lib/tidepool/corpus --out /out/dispatch.json /project
 python3 -c "import json;d=json.load(open('$WORK/dispatch.json'));assert d['snapshotDigest']=='$SNAP';print('dispatch analyzed', len(d['targets']), 'target(s) offline')"
 
-step 15 "create and verify a backup"
+step 16 "create and verify a backup"
 IMAGE_TAG="$IMAGE_TAG" TIDEPOOL_HOME="$TIDEPOOL_HOME" "$HERE/backup.sh"
 BUNDLE="$(find "$V/backups" -name 'corpus-*.tar.zst' | head -1)"
 [ -n "$BUNDLE" ] || { echo "no backup bundle"; exit 1; }
 
-step 16 "restore into a clean corpus"
+step 17 "restore into a clean corpus"
 CLEAN="$WORK/restored"
 mkdir -p "$CLEAN/corpus"
 podman run --rm --network=none \
@@ -193,7 +168,7 @@ podman run --rm --network=none \
     --data /var/lib/tidepool/corpus --in "/restore/$(basename "$BUNDLE")"
 echo "restored into $CLEAN/corpus"
 
-step 17 "compare snapshot digests (original corpus vs restored corpus)"
+step 18 "compare snapshot digests (original corpus vs restored corpus)"
 podman run --rm --network=none \
   --userns=keep-id:uid="$DEPLOY_CFG_CONTAINER_UID",gid="$DEPLOY_CFG_CONTAINER_GID" \
   -v "$CLEAN/corpus:/var/lib/tidepool/corpus:ro" \
@@ -206,13 +181,8 @@ podman run --rm --network=none \
     console.log('restored snapshot digest verified:', doc.digest.slice(0, 12));
   "
 
-step 18 "stop all services cleanly"
-for c in tidepool-scheduler tidepool-proxy tidepool-api tidepool-collector; do
-  podman stop -t 20 "$c" >/dev/null
-  rc="$(podman inspect -f '{{.State.ExitCode}}' "$c")"
-  [ "$rc" = "0" ] || { echo "$c exited $rc — not a clean shutdown"; podman logs --tail 5 "$c"; exit 1; }
-  echo "$c stopped cleanly (exit 0)"
-done
+step 19 "stop all services cleanly"
+"$HERE/ci-topology.sh" down
 
 echo
-echo "== ci-deploy-test: ALL 18 STEPS PASSED =="
+echo "== ci-deploy-test: ALL 19 STEPS PASSED =="

@@ -1,0 +1,173 @@
+# .github/workflows/appliance.yml
+#
+# The EXPLICIT appliance gate: every deployment invariant as its own named
+# step, so a failure names the requirement that regressed instead of a step
+# number inside a scenario script. The integrated 19-step live scenario
+# (ci-deploy-test.sh — snapshot, offline dispatch, restore digest
+# comparison) runs separately on a weekly schedule in deploy.yml; this
+# workflow is the per-change gate.
+#
+# Step ↔ requirement map:
+#   check generated deployment config      → check:deploy-config
+#   check component lock drift             → check:locks
+#   build every OCI target                 → build (5 targets, digest-pinned base)
+#   no npm/compilers in runtime images     → verify-image-contents.sh
+#   validate immutable tags                → immutable-tag validation
+#   parse AppArmor profiles                → compile + load profiles
+#   render Quadlets                        → render units + firewall
+#   validate units                         → quadlet generator dry-run
+#   boundary scripts on a capable runner   → negative boundary tests
+#   test backup and restore                → backup → clean-corpus restore → verify
+#   API operation with collector stopped   → availability with collector stopped
+name: appliance
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/**", "server/**", "shared/**", "web/**", "scripts/**", "package*.json", ".github/workflows/appliance.yml"]
+  pull_request:
+    paths: ["deploy/**", "server/**", "shared/**", "web/**", "scripts/**", "package*.json", ".github/workflows/appliance.yml"]
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  appliance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TIDEPOOL_HOME: /tmp/tidepool-appliance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install host tooling (podman, apparmor, shellcheck)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman apparmor apparmor-utils shellcheck
+          podman info --format 'podman {{.Version.Version}} rootless={{.Host.Security.Rootless}}'
+
+      - name: check generated deployment config (deploy.yaml ↔ deployConfig.generated.ts)
+        run: npm run check:deploy-config
+
+      - name: check component lock drift (workspace root lock ↔ standalone locks)
+        run: npm run check:locks
+
+      - name: shellcheck deployment scripts
+        run: shellcheck -S warning deploy/scripts/*.sh deploy/scripts/lib/*.sh scripts/*.sh
+
+      - name: build every OCI target (digest-pinned base, immutable tag)
+        run: |
+          BASE_IMAGE="$(./deploy/scripts/pin-base.sh)"
+          echo "base: $BASE_IMAGE"
+          [[ "$BASE_IMAGE" == *"@sha256:"* ]] || { echo "base not digest-pinned"; exit 1; }
+          VERSION="$(node -e "console.log(require('./package.json').version)")"
+          IMAGE_TAG="${VERSION}-g$(git rev-parse --short HEAD)"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+          for target in collector api scheduler proxy utility; do
+            podman build -q -f deploy/oci/Containerfile --target "$target" \
+              --build-arg BASE_IMAGE="$BASE_IMAGE" \
+              --build-arg TIDEPOOL_VERSION="$VERSION" \
+              --build-arg TIDEPOOL_GIT_COMMIT="$(git rev-parse HEAD)" \
+              -t "localhost/tidepool-$target:$IMAGE_TAG" . >/dev/null
+            echo "built tidepool-$target:$IMAGE_TAG"
+          done
+
+      - name: verify no runtime image includes npm or compilers
+        run: ./deploy/scripts/verify-image-contents.sh "$IMAGE_TAG"
+
+      - name: parse AppArmor profiles (compile-check all seven, then load)
+        run: |
+          apparmor_parser -Q deploy/apparmor/tidepool-*
+          echo "7 profiles compile"
+          sudo apparmor_parser -r deploy/apparmor/tidepool-* && echo "profiles loaded — topology steps run CONFINED"
+
+      - name: render Quadlets (+ host firewall) from deploy.yaml
+        run: OUT_DIR="$RUNNER_TEMP/rendered" IMAGE_TAG="$IMAGE_TAG" ./deploy/scripts/render.sh
+
+      - name: validate immutable tags in rendered units
+        run: |
+          [[ "$IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+-g[0-9a-f]+$ ]] || { echo "tag is not <semver>-g<commit>: $IMAGE_TAG"; exit 1; }
+          if grep -rq ":latest" "$RUNNER_TEMP/rendered/"; then
+            echo ":latest found in rendered units"; grep -rn ":latest" "$RUNNER_TEMP/rendered/"; exit 1
+          fi
+          n="$(grep -rh "^Image=" "$RUNNER_TEMP/rendered/" | sort -u | tee /dev/stderr | grep -c ":$IMAGE_TAG\$")"
+          [ "$n" -eq 4 ] || { echo "expected 4 units pinned to :$IMAGE_TAG, found $n"; exit 1; }
+          echo "all units reference the immutable tag $IMAGE_TAG"
+
+      - name: validate units (quadlet generator dry-run)
+        run: |
+          q=""
+          for c in /usr/lib/podman/quadlet /usr/libexec/podman/quadlet; do [ -x "$c" ] && q="$c" && break; done
+          [ -n "$q" ] || { echo "quadlet generator not found — cannot validate units on this runner"; exit 1; }
+          QUADLET_UNIT_DIRS="$RUNNER_TEMP/rendered" "$q" -dryrun -user >/dev/null
+          echo "quadlet dry-run OK ($q)"
+
+      - name: start the four-container topology (unit-equivalent flags)
+        run: ./deploy/scripts/ci-topology.sh up "$IMAGE_TAG"
+
+      - name: bounded live collection (one npm package; populates replica + corpus)
+        run: |
+          podman exec tidepool-collector node -e '
+            const http=require("http");
+            const req=http.request({socketPath:"/var/lib/tidepool/run/collector-control.sock",path:"/internal/control/sync-all",method:"POST",headers:{"x-caller":"appliance-ci"}},r=>process.exit(r.statusCode===202?0:1));
+            req.on("error",()=>process.exit(1));req.end()'
+          for _ in $(seq 1 30); do
+            n="$(podman exec tidepool-collector node -e '
+              const http=require("http");
+              http.request({socketPath:"/var/lib/tidepool/run/collector-control.sock",path:"/healthz"},r=>{let b="";r.on("data",c=>b+=c);r.on("end",()=>{console.log(JSON.parse(b).pendingSyncs)})}).on("error",()=>console.log("err")).end()' 2>/dev/null)"
+            [ "$n" = "0" ] && break; sleep 2
+          done
+          sleep 4
+          test -f "$TIDEPOOL_HOME/published/tidepool-read.sqlite3" || { echo "no replica published"; exit 1; }
+          echo "collection settled; replica published"
+
+      - name: execute boundary scripts (negative tests, JSON report)
+        run: ./deploy/scripts/boundaries-verify.sh --json "$RUNNER_TEMP/boundaries.json"
+
+      - name: test backup and restore (verified bundle → clean corpus → verify)
+        run: |
+          IMAGE_TAG="$IMAGE_TAG" ./deploy/scripts/backup.sh
+          BUNDLE="$(find "$TIDEPOOL_HOME/backups" -name 'corpus-*.tar.zst' | head -1)"
+          [ -n "$BUNDLE" ] || { echo "no backup bundle produced"; exit 1; }
+          CLEAN="$RUNNER_TEMP/restored" && mkdir -p "$CLEAN/corpus"
+          podman run --rm --network=none \
+            --userns=keep-id:uid=10001,gid=10001 \
+            -v "$CLEAN/corpus:/var/lib/tidepool/corpus:rw" \
+            -v "$(dirname "$BUNDLE"):/restore:ro" \
+            "localhost/tidepool-utility:$IMAGE_TAG" \
+            node /app/server/dist/server/src/cli/corpus.js import \
+              --data /var/lib/tidepool/corpus --in "/restore/$(basename "$BUNDLE")"
+          podman run --rm --network=none \
+            --userns=keep-id:uid=10001,gid=10001 \
+            -v "$CLEAN/corpus:/var/lib/tidepool/corpus:rw" \
+            "localhost/tidepool-utility:$IMAGE_TAG" \
+            node /app/server/dist/server/src/cli/corpus.js verify --data /var/lib/tidepool/corpus
+          echo "backup verified, restored into a clean corpus, restored corpus verified"
+
+      - name: confirm API operation with the collector stopped
+        run: |
+          podman stop -t 20 tidepool-collector >/dev/null
+          curl -fsS http://127.0.0.1:18747/healthz | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['ok'] and d['replicaOk'];print('api healthy with collector stopped')"
+          curl -fsS http://127.0.0.1:18747/api/domains/code/units/npm-ci/packages | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['total']>=1;print('reads served from published truth:', d['total'], 'package(s)')"
+          podman start tidepool-collector >/dev/null
+          for _ in $(seq 1 30); do
+            podman exec tidepool-collector node -e 'require("http").request({socketPath:"/var/lib/tidepool/run/collector-control.sock",path:"/healthz"},r=>process.exit(r.statusCode===200?0:1)).on("error",()=>process.exit(1)).end()' 2>/dev/null && break
+            sleep 2
+          done
+          echo "collector restarted and healthy"
+
+      - name: stop the topology (asserting clean exit codes)
+        run: ./deploy/scripts/ci-topology.sh down
+
+      - name: upload boundary report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appliance-boundary-report
+          path: ${{ runner.temp }}/boundaries.json
+          if-no-files-found: ignore
+
+      - name: cleanup
+        if: always()
+        run: podman rm -f tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler 2>/dev/null || true

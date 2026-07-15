@@ -11,15 +11,15 @@
 // filesystem access to the control socket, which per-service mounts and
 // socket mode 0660 scope to the appliance owner.
 //
-// Usage:
-//   tsx server/src/cli/admin.ts health
-//   tsx server/src/cli/admin.ts sync <domain> <unit>
-//   tsx server/src/cli/admin.ts sync-all
-//   tsx server/src/cli/admin.ts snapshot [stage] [windowHours]
-//   tsx server/src/cli/admin.ts publish
-//   tsx server/src/cli/admin.ts enrich <domain> <unit> <package>
-//   tsx server/src/cli/admin.ts enrich-changed [windowHours] [limit]
-//   tsp server/src/cli/admin.ts maintenance
+// Usage (runs from compiled dist — `npm run build:server` first):
+//   npm run admin health
+//   npm run admin sync <domain> <unit>
+//   npm run admin sync-all
+//   npm run admin snapshot [stage] [windowHours]
+//   npm run admin publish
+//   npm run admin enrich <domain> <unit> <package>
+//   npm run admin enrich-changed [windowHours] [limit]
+//   npm run admin maintenance
 //
 // Socket resolution: TIDEPOOL_CONTROL_SOCKET, else <dataDir>/run/….
 

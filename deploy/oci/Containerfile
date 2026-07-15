@@ -101,6 +101,12 @@ WORKDIR /app
 # fixed unprivileged identity; matches install.sh's chown of the bind mounts
 RUN groupadd -g 10001 tidepool && useradd -r -u 10001 -g 10001 -d /app -s /usr/sbin/nologin tidepool \
  && mkdir -p /var/lib/tidepool
+# the runtime base carries NO package manager and NO toolchain: node:slim
+# ships npm/npx/corepack, and "the profiles deny executing them" is weaker
+# than "they do not exist" — remove them so the image-contents CI gate
+# (deploy/scripts/verify-image-contents.sh) can assert absence, not policy
+RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn*
+
 COPY --from=build /src/server/dist          ./server/dist
 COPY --from=build /src/server/node_modules  ./server/node_modules
 COPY --from=build /src/server/migrations    ./server/migrations

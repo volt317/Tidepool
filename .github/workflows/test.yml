@@ -36,8 +36,7 @@ jobs:
 
       - name: Install
         run: |
-          npm ci
-          npm ci --prefix server
+          npm ci   # workspace root install: server + web, hoisted, one lock
 
       - name: Tests with coverage thresholds
         run: npm run test:coverage

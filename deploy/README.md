@@ -217,12 +217,18 @@ tagged with the enforcement layer under test. Success of any prohibited
 operation is an incident, and exits non-zero. `--json` emits the
 machine-readable report the weekly `tidepool-verify.timer` archives.
 
-CI (`.github/workflows/deploy.yml`) runs the full 18-step
-`ci-deploy-test.sh` on every deployment-affecting change and weekly: build →
-pin check → profile compile → shellcheck → render+validate → start the real
-topology → bounded live collection → publication → replica-served reads →
-positive + negative suites → snapshot → offline dispatch → verified backup →
-clean-corpus restore → snapshot digest comparison → clean stop.
+Two CI workflows share one topology definition
+(`deploy/scripts/ci-topology.sh`). `appliance.yml` is the per-change gate:
+every invariant as its own named step — generated-config and lock drift,
+all five image builds, **no npm/compilers in any runtime image**
+(`verify-image-contents.sh`; the runtime base deletes what node:slim
+ships), immutable-tag validation, AppArmor compile+load, Quadlet render and
+generator dry-run, then one live topology session for the negative boundary
+suite, backup → clean-corpus restore → verify, and API availability with
+the collector stopped. `deploy.yml` runs the integrated 19-step
+`ci-deploy-test.sh` scenario weekly and on demand, adding what the gate
+doesn't repeat: snapshot creation, offline dispatch, and the
+restore-then-compare-snapshot-digests round trip.
 
 ## Updating
 

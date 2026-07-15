@@ -41,9 +41,7 @@ jobs:
 
       - name: Install (root tooling, server, web)
         run: |
-          npm ci
-          npm ci --prefix server
-          npm ci --prefix web
+          npm ci   # workspace root install: server + web, hoisted, one lock
 
       - name: Build
         run: npm run build
@@ -78,7 +76,7 @@ jobs:
           name: tidepool-dist
 
       - name: Install server runtime deps
-        run: npm ci --prefix server --omit=dev
+        run: cd server && npm ci --omit=dev --workspaces=false   # standalone: the component lock's job
 
       - name: Ensure gpgv and the Ubuntu archive keyring
         run: |

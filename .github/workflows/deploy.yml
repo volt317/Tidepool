@@ -1,0 +1,52 @@
+# .github/workflows/deploy.yml
+#
+# The INTEGRATED deployment scenario: the containerized equivalent of the
+# live collector smoke. Builds the real images, runs the real four-container
+# topology, performs a bounded live collection, proves the replica/read
+# path and collector-stopped availability, runs the NEGATIVE boundary
+# suite, snapshots, dispatches offline, and round-trips a verified backup →
+# clean-corpus restore → snapshot digest comparison. See
+# deploy/scripts/ci-deploy-test.sh for the 19 numbered steps.
+#
+# Per-change gating is .github/workflows/appliance.yml (each invariant as
+# its own named step); this workflow runs the end-to-end scenario weekly —
+# catching upstream base-image and registry drift the way the collector
+# smoke catches upstream format drift — and on demand.
+name: deploy
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install host tooling (podman, apparmor, shellcheck)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman apparmor apparmor-utils shellcheck
+          podman info --format 'podman {{.Version.Version}} rootless={{.Host.Security.Rootless}}'
+
+      - name: verify generated deploy config is in sync with deploy/deploy.yaml
+        run: npm run check:deploy-config
+
+      - name: verify component locks are in sync with the workspace
+        run: npm run check:locks
+
+      - name: run the 19-step deployment scenario
+        run: ./deploy/scripts/ci-deploy-test.sh
+
+      - name: upload boundary report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boundary-report
+          path: /tmp/**/boundaries.json
+          if-no-files-found: ignore

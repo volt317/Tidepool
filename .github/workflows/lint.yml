@@ -35,9 +35,7 @@ jobs:
 
       - name: Install (root tooling, server, web)
         run: |
-          npm ci
-          npm ci --prefix server
-          npm ci --prefix web
+          npm ci   # workspace root install: server + web, hoisted, one lock
 
       - name: ESLint
         run: npm run lint

@@ -37,7 +37,9 @@ echo "render: configurables from $DEPLOY_CFG_SOURCE"
 
 if [ -z "${IMAGE_TAG:-}" ]; then
   commit="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)"
-  IMAGE_TAG="0.3.0-g${commit}"
+  # the version has ONE home — the root package.json — same as install.sh
+  version="$(node -e "console.log(require('$REPO/package.json').version)" 2>/dev/null || echo 0.0.0-dev)"
+  IMAGE_TAG="${version}-g${commit}"
 fi
 
 # profile digest: identity of the AppArmor profile set that should be loaded
