@@ -23,6 +23,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
+# shellcheck source=lib/deploy-config.sh
+source "$HERE/lib/deploy-config.sh"
 WORK="${CI_WORK:-$(mktemp -d)}"
 export TIDEPOOL_HOME="$WORK/appliance"
 IMAGE_TAG="ci-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo local)"
@@ -95,7 +97,7 @@ cat > "$TIDEPOOL_HOME/config/tidepool.config.json" <<'CFG'
 }
 CFG
 # shellcheck disable=SC2054  # commas here are podman flag syntax, not array separators
-COMMON=(--userns=keep-id:uid=10001,gid=10001 --read-only "--tmpfs" "/tmp:rw,noexec,nosuid" --cap-drop=all --security-opt no-new-privileges)
+COMMON=("--userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID" --read-only "--tmpfs" "/tmp:rw,noexec,nosuid" --cap-drop=all --security-opt no-new-privileges)
 V="$TIDEPOOL_HOME"
 # shellcheck disable=SC2046
 podman run -d --name tidepool-collector "${COMMON[@]}" $(AA tidepool-collector) \
@@ -112,7 +114,7 @@ podman run -d --name tidepool-api --network=none "${COMMON[@]}" $(AA tidepool-ap
 # shellcheck disable=SC2046
 podman run -d --name tidepool-proxy "${COMMON[@]}" $(AA tidepool-proxy) \
   -v "$V/run:/var/lib/tidepool/run:rw" -v "$V/config:/var/lib/tidepool/config:ro" \
-  -e TIDEPOOL_PROXY_ADDR=0.0.0.0 -p 127.0.0.1:18747:8747 \
+  -e TIDEPOOL_PROXY_ADDR=0.0.0.0 -p "127.0.0.1:18747:$DEPLOY_CFG_INTERNAL_PORT" \
   "localhost/tidepool-proxy:$IMAGE_TAG" >/dev/null
 # shellcheck disable=SC2046
 podman run -d --name tidepool-scheduler --network=none "${COMMON[@]}" $(AA tidepool-scheduler) \
@@ -166,7 +168,7 @@ mkdir -p "$WORK/project"
 echo '{ "name": "ci-project", "dependencies": { "express": "^5.0.0" } }' > "$WORK/project/package.json"
 # shellcheck disable=SC2046
 podman run --rm --network=none $(AA tidepool-dispatch) \
-  --userns=keep-id:uid=10001,gid=10001 \
+  --userns=keep-id:uid="$DEPLOY_CFG_CONTAINER_UID",gid="$DEPLOY_CFG_CONTAINER_GID" \
   -v "$V/corpus/snapshots:/var/lib/tidepool/corpus/snapshots:ro" \
   -v "$WORK/project:/project:ro" -v "$WORK:/out:rw" \
   "localhost/tidepool-utility:$IMAGE_TAG" \
@@ -183,7 +185,7 @@ step 16 "restore into a clean corpus"
 CLEAN="$WORK/restored"
 mkdir -p "$CLEAN/corpus"
 podman run --rm --network=none \
-  --userns=keep-id:uid=10001,gid=10001 \
+  --userns=keep-id:uid="$DEPLOY_CFG_CONTAINER_UID",gid="$DEPLOY_CFG_CONTAINER_GID" \
   -v "$CLEAN/corpus:/var/lib/tidepool/corpus:rw" \
   -v "$(dirname "$BUNDLE"):/restore:ro" \
   "localhost/tidepool-utility:$IMAGE_TAG" \
@@ -193,7 +195,7 @@ echo "restored into $CLEAN/corpus"
 
 step 17 "compare snapshot digests (original corpus vs restored corpus)"
 podman run --rm --network=none \
-  --userns=keep-id:uid=10001,gid=10001 \
+  --userns=keep-id:uid="$DEPLOY_CFG_CONTAINER_UID",gid="$DEPLOY_CFG_CONTAINER_GID" \
   -v "$CLEAN/corpus:/var/lib/tidepool/corpus:ro" \
   "localhost/tidepool-utility:$IMAGE_TAG" \
   node --input-type=module -e "

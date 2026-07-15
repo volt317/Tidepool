@@ -1,0 +1,62 @@
+# deploy/deploy.yaml — the single location for build/deployment
+# configurables that MORE THAN ONE FILE must agree on.
+#
+# Scope rule (deliberate): a value belongs here only when it appears in
+# several places that would otherwise drift — the proxy port used to live
+# in eight files, the container uid in six. Values with an existing
+# authoritative home stay there and are NOT duplicated here:
+#
+#   application behavior        → tidepool.config.json (validated schema:
+#                                  sources, scheduler cadence, maintenance)
+#   release version             → package.json
+#   per-service resource limits → the unit templates (each appears exactly
+#                                  once; no agreement problem to solve)
+#
+# Consumption — two consumers, one parse contract (flat `key: value`
+# subset: comments strip at '#', flat snake_case keys, optional quotes, no
+# nesting, no lists; keep it that way):
+#
+#   shell   deploy/scripts/lib/deploy-config.sh — sourced by the deploy
+#           scripts when THEY run (render/install/operator invocation)
+#   ts/js   scripts/generate-deploy-config.mjs — runs BEFORE tsc and bakes
+#           these values into shared/deployConfig.generated.ts (committed);
+#           the compiled services carry them as static consts and never
+#           read this file at runtime. CI fails if the generated module
+#           drifts from this file.
+#
+# Precedence for the shell consumers is:
+#
+#   environment variable  >  this file  >  the script's built-in fallback
+#
+# so one-off overrides (`LISTEN_PORT=9000 ./install.sh`, CI's IMAGE_TAG)
+# keep working unchanged. install.sh copies this file next to the operator
+# scripts in $TIDEPOOL_HOME/bin/, so installed backup/restore/verify read
+# the same values the units were rendered from.
+
+# ---------------------------------------------------------------- images
+# Base image TAG; pin-base.sh resolves it to a digest at build time — the
+# digest, not this tag, is what builds actually use.
+base_image: docker.io/library/node:22-bookworm-slim
+# Local image name prefix; tags are <prefix>-<target>:<version>-g<commit>.
+image_prefix: localhost/tidepool
+
+# -------------------------------------------------------------- listener
+# The HOST-side listener the proxy publishes (the appliance's only
+# published port). 127.0.0.1 unless a trusted-LAN address is deliberate.
+listen_addr: 127.0.0.1
+listen_port: 8747
+# Container-INTERNAL proxy port. Changing listen_port does not require
+# touching this; it exists so the unit's PublishPort/HealthCmd and the
+# Containerfile EXPOSE agree. Rebuild images if you change it.
+internal_port: 8747
+
+# -------------------------------------------------------------- identity
+# In-container uid/gid every service runs as (UserNS=keep-id target) and
+# every ad-hoc utility container (backup/restore/verify) must match, or
+# file ownership in the data trees fractures.
+container_uid: 10001
+container_gid: 10001
+
+# ------------------------------------------------------------- data root
+# Default $TIDEPOOL_HOME. '~' expands to the invoking user's home.
+data_root: ~/.local/share/tidepool

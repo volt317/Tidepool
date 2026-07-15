@@ -16,9 +16,12 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-TIDEPOOL_HOME="${TIDEPOOL_HOME:-$HOME/.local/share/tidepool}"
-LISTEN_ADDR="${LISTEN_ADDR:-127.0.0.1}"
-LISTEN_PORT="${LISTEN_PORT:-8747}"
+# shellcheck source=lib/deploy-config.sh
+source "$HERE/lib/deploy-config.sh"
+TIDEPOOL_HOME="${TIDEPOOL_HOME:-$DEPLOY_CFG_DATA_ROOT}"
+LISTEN_ADDR="${LISTEN_ADDR:-$DEPLOY_CFG_LISTEN_ADDR}"
+LISTEN_PORT="${LISTEN_PORT:-$DEPLOY_CFG_LISTEN_PORT}"
+IMAGE_PREFIX="${IMAGE_PREFIX:-$DEPLOY_CFG_IMAGE_PREFIX}"
 QUADLET_DIR="$HOME/.config/containers/systemd"
 TIMER_DIR="$HOME/.config/systemd/user"
 
@@ -34,6 +37,7 @@ COMMIT_FULL="$(git -C "$REPO" rev-parse HEAD)"
 IMAGE_TAG="${VERSION}-g${COMMIT}"
 
 echo "== Tidepool isolated-appliance install =="
+echo "   config    : $DEPLOY_CFG_SOURCE"
 echo "   data root : $TIDEPOOL_HOME"
 echo "   image tag : $IMAGE_TAG (immutable; no :latest anywhere)"
 echo "   listener  : $LISTEN_ADDR:$LISTEN_PORT (proxy; the only published port)"
@@ -62,7 +66,8 @@ for target in collector api scheduler proxy utility; do
     --build-arg BASE_IMAGE="$BASE_IMAGE" \
     --build-arg TIDEPOOL_VERSION="$VERSION" \
     --build-arg TIDEPOOL_GIT_COMMIT="$COMMIT_FULL" \
-    -t "localhost/tidepool-$target:$IMAGE_TAG" "$REPO"
+    --build-arg INTERNAL_PORT="$DEPLOY_CFG_INTERNAL_PORT" \
+    -t "$IMAGE_PREFIX-$target:$IMAGE_TAG" "$REPO"
 done
 
 # record final image digests: the identity that snapshot provenance names
@@ -71,7 +76,7 @@ digest_manifest="$TIDEPOOL_HOME/exports/image-digests-$IMAGE_TAG.json"
   echo "{"
   first=1
   for target in collector api scheduler proxy utility; do
-    d="$(podman image inspect --format '{{.Digest}}' "localhost/tidepool-$target:$IMAGE_TAG")"
+    d="$(podman image inspect --format '{{.Digest}}' "$IMAGE_PREFIX-$target:$IMAGE_TAG")"
     [ $first -eq 1 ] || echo ","
     first=0
     printf '  "tidepool-%s": "%s"' "$target" "$d"
@@ -93,8 +98,12 @@ install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-backup.timer "$TIMER_DIR
 install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-verify.service "$TIMER_DIR/" 2>/dev/null || true
 install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-verify.timer "$TIMER_DIR/" 2>/dev/null || true
 
-# operator tooling next to the data
+# operator tooling next to the data — deploy.yaml and the loader travel with
+# the scripts so installed tooling reads the same values the units used
 install -m 755 "$HERE"/backup.sh "$HERE"/restore.sh "$HERE"/verify.sh "$HERE"/boundaries-verify.sh "$TIDEPOOL_HOME/bin/"
+install -m 644 "$REPO/deploy/deploy.yaml" "$TIDEPOOL_HOME/bin/deploy.yaml"
+mkdir -p "$TIDEPOOL_HOME/bin/lib"
+install -m 644 "$HERE/lib/deploy-config.sh" "$TIDEPOOL_HOME/bin/lib/deploy-config.sh"
 
 systemctl --user daemon-reload
 
@@ -106,9 +115,10 @@ cat <<NEXT
      sudo install -m 644 $REPO/deploy/apparmor/tidepool-{collector,api,scheduler,proxy,dispatch,corpus-export,corpus-import} /etc/apparmor.d/
      sudo apparmor_parser -r /etc/apparmor.d/tidepool-*
 
-2. Host firewall (REQUIRED on hostile networks — edit the three defines):
-     \$EDITOR $REPO/deploy/nftables/tidepool.nft
-     sudo nft -f $REPO/deploy/nftables/tidepool.nft
+2. Host firewall (REQUIRED on hostile networks — edit uid/resolvers/subnet;
+   the port was rendered from deploy.yaml):
+     \$EDITOR $REPO/deploy/quadlet/rendered/tidepool.nft
+     sudo nft -f $REPO/deploy/quadlet/rendered/tidepool.nft
 
 3. Keyrings: copy the archive keyrings your config references into
      $TIDEPOOL_HOME/keyrings/

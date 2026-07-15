@@ -18,7 +18,7 @@
 #                        matches its content digest
 set -uo pipefail
 
-BASE="${TIDEPOOL_HOME:-$HOME/.local/share/tidepool}"
+BASE="${TIDEPOOL_HOME:-$DEPLOY_CFG_DATA_ROOT}"
 FAIL=0
 pass() { printf 'PASS  %s\n' "$1"; }
 fail() { printf 'FAIL  %s\n' "$1"; FAIL=1; }
@@ -73,7 +73,7 @@ if systemctl --user is-active tidepool-collector.service >/dev/null 2>&1; then
     [[ "$h" == "healthy" || "$h" == "starting" ]] && pass "deployment: $c health=$h" || fail "deployment: $c health=$h"
   done
   # the PROXY answers on the single published port (through it: the API)
-  port="${LISTEN_PORT:-8747}"
+  port="${LISTEN_PORT:-$DEPLOY_CFG_LISTEN_PORT}"
   curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && pass "deployment: proxy→api /healthz reachable on published port" || fail "deployment: proxy→api /healthz not reachable on :$port"
   # the COLLECTOR must publish no port at all
   cports="$(podman port tidepool-collector 2>/dev/null | wc -l)"
@@ -102,7 +102,7 @@ if [[ -n "$UTILITY" && -f "$BASE/corpus/writer/tidepool.sqlite3" ]]; then
   out=$(podman run --rm --network=none \
       ${APPARMOR_VERIFY_OPT:-} \
       -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
-      --userns=keep-id:uid=10001,gid=10001 \
+      --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
       "$UTILITY" node --input-type=module -e '
         const { SqliteObservationStore } = await import("/app/server/dist/server/src/core/store.js");
         const { SnapshotStore } = await import("/app/server/dist/server/src/core/snapshot.js");

@@ -23,7 +23,7 @@ Volume=@TIDEPOOL_HOME@/run:/var/lib/tidepool/run:rw
 
 Network=none
 
-UserNS=keep-id:uid=10001,gid=10001
+UserNS=keep-id:uid=@CONTAINER_UID@,gid=@CONTAINER_GID@
 DropCapability=all
 NoNewPrivileges=true
 PodmanArgs=--security-opt apparmor=tidepool-scheduler --pids-limit=64

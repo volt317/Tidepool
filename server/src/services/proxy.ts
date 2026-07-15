@@ -21,6 +21,7 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { randomUUID } from "node:crypto";
 
 import { loadConfig, makeLogger, onShutdown, resolveRuntimeDirs, socketPaths } from "./bootstrap.js";
+import { DEPLOY_CONFIG } from "../../../shared/deployConfig.generated.js";
 
 const log = makeLogger("proxy");
 
@@ -34,7 +35,9 @@ const API_SOCKET = socketPaths(runDir).api;
 
 // conservative listener defaults: loopback unless explicitly widened
 const LISTEN_ADDR = process.env.TIDEPOOL_PROXY_ADDR || "127.0.0.1";
-const LISTEN_PORT = Number(process.env.TIDEPOOL_PROXY_PORT || initial.config.server.port || 8747);
+// final fallback is baked from deploy/deploy.yaml at compilation — the
+// compiled JS carries it as a static const; nothing reads YAML at runtime
+const LISTEN_PORT = Number(process.env.TIDEPOOL_PROXY_PORT || initial.config.server.port || DEPLOY_CONFIG.internalPort);
 const MAX_BODY = Number(process.env.TIDEPOOL_PROXY_MAX_BODY || 1_048_576); // 1 MiB
 const TIMEOUT_MS = Number(process.env.TIDEPOOL_PROXY_TIMEOUT_MS || 60_000);
 

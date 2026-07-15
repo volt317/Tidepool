@@ -16,8 +16,11 @@
 #   4. start services         systemctl --user start tidepool-collector tidepool-scheduler
 #   5. verify                 ~/.local/share/tidepool/bin/verify.sh && bin/boundaries-verify.sh
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-config.sh
+source "$HERE/lib/deploy-config.sh"
 
-BASE="${TIDEPOOL_HOME:-$HOME/.local/share/tidepool}"
+BASE="${TIDEPOOL_HOME:-$DEPLOY_CFG_DATA_ROOT}"
 BUNDLE="${1:?usage: restore.sh <corpus-….tar.zst>}"
 BUNDLE="$(readlink -f "$BUNDLE")"
 [[ -f "$BUNDLE" ]] || { echo "restore: $BUNDLE not found"; exit 2; }
@@ -43,7 +46,7 @@ fi
 run_import() {
   # shellcheck disable=SC2086
   podman run --rm --network=none \
-    --userns=keep-id:uid=10001,gid=10001 \
+    --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
     -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
     -v "$(dirname "$BUNDLE")":/restore:ro \
     ${APPARMOR_OPT:-} \
@@ -60,14 +63,14 @@ echo "==> importing"
 run_import
 echo "==> verifying restored corpus"
 podman run --rm --network=none ${APPARMOR_OPT:-} \
-  --userns=keep-id:uid=10001,gid=10001 \
+  --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
   -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
   "$UTILITY" \
   node /app/server/dist/server/src/cli/corpus.js verify --data /var/lib/tidepool/corpus
 echo "==> publishing a fresh read replica from the restored corpus"
 mkdir -p "$BASE/published"
 podman run --rm --network=none \
-  --userns=keep-id:uid=10001,gid=10001 \
+  --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
   -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
   -v "$BASE/published":/var/lib/tidepool/published:rw \
   "$UTILITY" \

@@ -6,7 +6,10 @@
 # point at today. install.sh and CI call this and pass the result into the
 # build; CI additionally FAILS if the build arg is not digest-pinned.
 set -euo pipefail
-BASE_TAG="${BASE_TAG:-docker.io/library/node:22-bookworm-slim}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-config.sh
+source "$HERE/lib/deploy-config.sh"
+BASE_TAG="${BASE_TAG:-$DEPLOY_CFG_BASE_IMAGE}"
 podman pull -q "$BASE_TAG" >/dev/null
 digest="$(podman image inspect --format '{{index .RepoDigests 0}}' "$BASE_TAG")"
 if [[ "$digest" != *"@sha256:"* ]]; then

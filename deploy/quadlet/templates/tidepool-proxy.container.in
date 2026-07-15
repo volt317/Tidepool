@@ -4,7 +4,7 @@
 # The frontend proxy: the ONLY network-facing process. Forwards TCP to the
 # API's Unix socket with size/time limits; holds no data whatsoever — its
 # mount set is run/ (for api.sock) and nothing else. Host exposure is the
-# PublishPort line: @LISTEN_ADDR@ is 127.0.0.1 unless the operator has
+# PublishPort line: the listen address is 127.0.0.1 unless the operator has
 # deliberately configured a trusted-LAN address at render time.
 #
 # The proxy's own netns has outbound routes (rootless networking has no
@@ -27,9 +27,9 @@ Tmpfs=/tmp:rw,noexec,nosuid,size=16m
 Volume=@TIDEPOOL_HOME@/run:/var/lib/tidepool/run:rw
 Volume=@TIDEPOOL_HOME@/config:/var/lib/tidepool/config:ro
 
-PublishPort=@LISTEN_ADDR@:@LISTEN_PORT@:8747
+PublishPort=@LISTEN_ADDR@:@LISTEN_PORT@:@INTERNAL_PORT@
 
-UserNS=keep-id:uid=10001,gid=10001
+UserNS=keep-id:uid=@CONTAINER_UID@,gid=@CONTAINER_GID@
 DropCapability=all
 NoNewPrivileges=true
 PodmanArgs=--security-opt apparmor=tidepool-proxy --pids-limit=64
@@ -38,11 +38,11 @@ PodmanArgs=--memory=128m --cpus=0.5 --ulimit=nofile=2048:2048
 # in-container bind must be the netns wildcard for the published-port path;
 # host reachability is confined by PublishPort above
 Environment=TIDEPOOL_PROXY_ADDR=0.0.0.0
-Environment=TIDEPOOL_PROXY_PORT=8747
+Environment=TIDEPOOL_PROXY_PORT=@INTERNAL_PORT@
 Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
 Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
 
-HealthCmd=node -e "fetch('http://127.0.0.1:8747/healthz').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))"
+HealthCmd=node -e "fetch('http://127.0.0.1:@INTERNAL_PORT@/healthz').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))"
 HealthInterval=30s
 HealthRetries=3
 HealthStartPeriod=15s

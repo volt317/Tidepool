@@ -320,6 +320,73 @@ scheduler   --network=none · drives collection/snapshot/verification/
 dispatch    ad-hoc jobs, --network=none, read-only project mounts
 ```
 
+### Build path
+
+All five images come from one multi-target Containerfile,
+`deploy/oci/Containerfile` (targets: `collector`, `api`, `scheduler`,
+`proxy`, `utility` — the last carries the CLIs for dispatch, corpus
+export/import, and verification jobs). `install.sh` drives the build, but
+it is ordinary `podman build`:
+
+```sh
+BASE=$(deploy/scripts/pin-base.sh)          # resolves the node:22-bookworm-slim
+                                            # base to its CURRENT digest
+podman build -f deploy/oci/Containerfile --target collector \
+  --build-arg BASE_IMAGE="$BASE" \
+  --build-arg TIDEPOOL_VERSION=0.3.0 \
+  --build-arg TIDEPOOL_GIT_COMMIT=$(git rev-parse HEAD) \
+  -t localhost/tidepool-collector:0.3.0-g$(git rev-parse --short HEAD) .
+```
+
+Image discipline, enforced rather than suggested: the base is pinned **by
+digest** at build time (CI fails builds that used the floating tag); local
+tags are immutable (`<version>-g<commit>` — rendered units never reference
+`:latest`, and `render.sh` refuses to emit one that does); the version/
+commit build args are baked as environment so every snapshot manifest and
+replica publication records the exact software identity that produced it;
+and `install.sh` writes the final image digests to
+`exports/image-digests-<tag>.json`. The collector image is the only one
+that adds a package (`gpgv`, for archive signature verification); the build
+stage compiles TypeScript and the frontend, and runtime stages carry only
+`server/dist`, production `node_modules`, migrations, and (API only)
+`web/dist` — the read-only root itself is the Quadlet unit's doing
+(`ReadOnly=true`), so even the collector image contains nothing writable
+at runtime beyond its mounted data trees and a `noexec` tmpfs.
+
+### Runtime
+
+The runtime is **rootless Podman under user-level systemd via Quadlet**
+(Podman ≥ 4.4). Units are not hand-written: `deploy/scripts/render.sh`
+renders the templates in `deploy/quadlet/templates/` with this
+deployment's data root, image tag, and listener address (refusing
+unresolved placeholders), and `install.sh` places the result in
+`~/.config/containers/systemd/`, where the Quadlet generator turns each
+`.container` file into a systemd service:
+
+```sh
+systemctl --user start  tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler
+systemctl --user status tidepool-collector      # health, restarts, journal
+journalctl --user -u tidepool-collector -f      # structured JSON-line logs
+loginctl enable-linger $USER                    # keep running after logout
+```
+
+Every unit declares a read-only root filesystem, dropped capabilities,
+`NoNewPrivileges`, its AppArmor profile, pids/memory/cpu limits, a health
+check (the collector and API answer over their Unix sockets; the scheduler
+is checked by heartbeat-file freshness), restart-on-failure with startup
+rate limiting (`StartLimitBurst=5`/300s), and `TimeoutStopSec=120` so the
+collector's SIGTERM drain — finish in-flight observations, complete a
+pending replica publication, close the writer — always has room. Two
+systemd user timers (`tidepool-backup.timer` daily, `tidepool-verify.timer`
+weekly) run the operational jobs in confined utility containers.
+
+Host requirements: `podman` (≥ 4.4 for Quadlet) and a systemd user
+session; `apparmor_parser` and `nft` for the two host-side enforcement
+layers; `git` and Node ≥ 22.13 to build and to run the admin CLI from the
+checkout (`npm run admin` — or exec the same CLI inside the utility image
+if the host has no Node). Nothing on the host needs root except loading
+AppArmor profiles and nftables rules — the printed post-install steps.
+
 Each service has its own AppArmor profile (seven ship, including
 corpus-export/import for backup tooling), and a host nftables policy
 (`deploy/nftables/tidepool.nft`) narrows the collector to DNS + 443 —

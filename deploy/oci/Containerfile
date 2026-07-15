@@ -34,6 +34,10 @@
 #     -t localhost/tidepool-collector:$TAG .
 #   … and the same for api / scheduler / proxy / utility.
 #
+# Shared configurables (base image tag, internal port, container uid) come
+# from deploy/deploy.yaml via install.sh's --build-arg lines; the ARG
+# defaults below only serve bare `podman build` invocations.
+#
 # IMAGE DISCIPLINE (isolated-appliance evolution):
 #   * BASE_IMAGE is an ARG so the base is pinned BY DIGEST at build time
 #     (pin-base.sh resolves the current digest; CI fails builds that used
@@ -123,7 +127,8 @@ CMD ["node", "server/dist/server/src/services/api.js"]
 # with no corpus, snapshot, or config-content knowledge. This is what lets
 # the API container run with --network=none.
 FROM base AS proxy
-EXPOSE 8747
+ARG INTERNAL_PORT=8747
+EXPOSE ${INTERNAL_PORT}
 CMD ["node", "server/dist/server/src/services/proxy.js"]
 
 # ------------------------------------------------------------------ scheduler

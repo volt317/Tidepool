@@ -28,6 +28,8 @@ import { SnapshotStore } from "./core/snapshot.js";
 import { buildRouter } from "./core/routes.js";
 import { buildProviders } from "./domains/providers.js";
 import { DiskCache } from "./lib/util.js";
+import { prepareSocket, resolveRuntimeDirs, socketPaths } from "./services/bootstrap.js";
+import { DEPLOY_CONFIG } from "../../shared/deployConfig.generated.js";
 
 const ROOT = resolve(process.env.TIDEPOOL_ROOT || process.cwd());
 
@@ -113,7 +115,27 @@ if (process.env.TIDEPOOL_SERVE_STATIC === "1") {
   }
 }
 
-const port = current.config.server.port ?? 8747;
+const port = current.config.server.port ?? DEPLOY_CONFIG.listenPort; // fallback baked from deploy.yaml at compile time
 app.listen(port, () => {
   console.log(`tidepool service listening on :${port} (root: ${ROOT})`);
 });
+
+// Deployment parity: dev mode also serves the control surface on the same
+// Unix socket path the appliance's collector uses, so the admin CLI
+// (`npm run admin …`) works identically against `npm start` and against a
+// deployed collector. The composed router already contains the control
+// routes; this is a second, local-only door to the same handlers.
+try {
+  const control = express();
+  control.use(express.json({ limit: "256kb" }));
+  control.get("/healthz", (_req, res) => res.json({ service: "dev", ok: true, note: "single-process development mode" }));
+  control.use("/internal", (req, res, next) => current.router(req, res, next));
+  const sock = socketPaths(resolveRuntimeDirs(current.config).runDir).control;
+  const tighten = prepareSocket(sock);
+  control.listen(sock, () => {
+    tighten();
+    console.log(`tidepool control socket at ${sock} (admin CLI: npm run admin …)`);
+  });
+} catch (e) {
+  console.warn(`control socket unavailable (${String(e instanceof Error ? e.message : e)}) — admin CLI disabled in this session`);
+}

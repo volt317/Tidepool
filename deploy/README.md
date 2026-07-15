@@ -49,7 +49,7 @@ listed here is a convention, not a guarantee.
 | Proxy holds no data | only `run/` and `config/` exist in its mount namespace; AppArmor denies the rest by name |
 | Only node executes (any container) | AppArmor `deny …sh x`, `deny /usr/bin/** x` (collector additionally allows `gpgv`) |
 | Collection can't be triggered from the API | the API has no route to the control socket in code, and answers 405; control requires filesystem access to the socket (admin CLI or scheduler) |
-| Collector egress limited to DNS+443 | **host nftables** (`deploy/nftables/tidepool.nft`) — a REQUIRED layer on hostile networks, because rootless egress is user-level traffic |
+| Collector egress limited to DNS+443 | **host nftables** (rendered `tidepool.nft`) — a REQUIRED layer on hostile networks, because rootless egress is user-level traffic |
 | Proxy originates no Internet traffic | its *code* dials only the fixed socket path; nftables drops other egress from the appliance user. AppArmor cannot distinguish inbound accept from outbound connect on inet sockets — stated, not papered over |
 | Evidence can't be silently created by UI clicks | enrichment happens only in the collector and is recorded as observations; the API serves stored evidence only |
 
@@ -80,6 +80,43 @@ exports/     image digests, boundary reports, retention audits
 bin/         backup.sh restore.sh verify.sh boundaries-verify.sh
 ```
 
+## One place for shared configurables: `deploy/deploy.yaml`
+
+Every value that more than one file must agree on — base image tag, host
+listener address/port, container-internal port, in-container uid/gid,
+default data root — lives in `deploy/deploy.yaml` and nowhere else. The
+renderer, installer, base-pinner, operator scripts, and the CI test all
+load it via `deploy/scripts/lib/deploy-config.sh` (a flat `key: value`
+parser; no yq/python needed), with the precedence:
+
+```
+environment variable  >  deploy.yaml  >  built-in fallback
+```
+
+so `LISTEN_PORT=9000 ./deploy/scripts/install.sh` still works for one-off
+runs, and a missing deploy.yaml degrades to the historical defaults.
+
+TypeScript consumes the same file at **compile time only**:
+`scripts/generate-deploy-config.mjs` runs before `tsc` (wired into
+`build:server`) and bakes the values into the committed
+`shared/deployConfig.generated.ts` — the running services hold them as
+static consts in compiled JS and never open deploy.yaml. Both parsers
+implement the identical flat `key: value` contract, and CI's
+`--check` step fails the build if the generated module and the YAML
+disagree. The shell scripts' reads happen when *those scripts* run
+(render, install, backup — operator actions), not in any long-running
+service.
+`install.sh` copies the file (and the loader) into `$TIDEPOOL_HOME/bin/`,
+so installed backup/restore/verify tooling reads the same values the units
+were rendered from. The host firewall is rendered from
+`deploy/nftables/tidepool.nft.in` with the same port, then hand-edited for
+the three genuinely site-specific defines (uid, resolvers, LAN subnet).
+
+Deliberately **not** in this file: application behavior
+(`tidepool.config.json`, validated), the release version (`package.json`),
+and per-service resource limits (each appears exactly once, in its unit
+template — no agreement problem to solve).
+
 ## Install
 
 ```bash
@@ -89,7 +126,7 @@ bin/         backup.sh restore.sh verify.sh boundaries-verify.sh
 ```
 
 Then perform the printed root steps: load the seven AppArmor profiles,
-adapt and load `deploy/nftables/tidepool.nft`, copy keyrings, review the
+adapt and load the rendered `deploy/quadlet/rendered/tidepool.nft`, copy keyrings, review the
 rendered units in `~/.config/containers/systemd/`, and start:
 
 ```bash
@@ -103,6 +140,38 @@ The listener defaults to `127.0.0.1:8747`. For a trusted LAN:
 subnet into the nftables `lan_clients` define. TLS/mTLS or reverse-proxy
 authentication can front the proxy port; the API itself remains
 read-oriented either way.
+
+### Rootless build warnings (`can't raise ambient capability CAP_…`)
+
+Seeing a block of `can't raise ambient capability CAP_CHOWN … operation not
+permitted` warnings during `podman build` means the build process could not
+assume the container's default capability set. Two causes, one of which
+matters:
+
+- **Missing subordinate uid/gid ranges** (`/etc/subuid` has no entry for
+  your user, or `newuidmap`/`newgidmap` aren't installed): Podman falls back
+  to a single-uid user namespace with no in-namespace root. The Tidepool
+  images build anyway — nothing in them installs file capabilities or
+  foreign-uid files (`gpgv` is the only added package) — **but the runtime
+  will not start**, because every unit's `UserNS=keep-id:uid=10001` needs a
+  real range. Fix before starting services:
+
+  ```sh
+  sudo apt install uidmap
+  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
+  podman system migrate
+  ```
+
+  Diagnose with `podman unshare cat /proc/self/uid_map` — one line mapping
+  only your uid means this case.
+
+- **Nested/chroot-isolation builds** (building inside another container or
+  a restricted environment): cosmetic for this image set.
+
+Either way, verify the layer that triggered the warnings rather than
+trusting it: `podman run --rm localhost/tidepool-collector:<tag> gpgv
+--version` — and the first live collection re-proves gpgv end-to-end as a
+per-pocket verification status.
 
 ## Operating
 

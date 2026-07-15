@@ -40,6 +40,7 @@ import { DiskCache } from "../lib/util.js";
 
 import { ROOT, loadConfig, makeLogger, onShutdown, prepareSocket, resolveDirs, resolveRuntimeDirs, socketPaths } from "./bootstrap.js";
 import type { TidepoolConfig } from "../../../shared/types.js";
+import { DEPLOY_CONFIG } from "../../../shared/deployConfig.generated.js";
 
 const log = makeLogger("api");
 
@@ -191,7 +192,7 @@ if ((process.env.TIDEPOOL_API_LISTEN ?? "").startsWith("unix")) {
     log.info("api listening on unix socket (fronted by proxy; --network=none capable)", { socket: sockets.api });
   });
 } else {
-  const port = current.config.server.port ?? 8747;
+  const port = current.config.server.port ?? DEPLOY_CONFIG.listenPort; // fallback baked from deploy.yaml at compile time
   server = app.listen(port, "127.0.0.1", () => {
     log.info("api listening on loopback TCP (development mode)", { port });
   });

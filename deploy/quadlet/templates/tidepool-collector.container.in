@@ -45,7 +45,7 @@ Volume=@TIDEPOOL_HOME@/run:/var/lib/tidepool/run:rw
 # (boundaries-verify.sh asserts `podman port tidepool-collector` is empty.)
 
 # --------------------------------------------------------------- identity
-UserNS=keep-id:uid=10001,gid=10001
+UserNS=keep-id:uid=@CONTAINER_UID@,gid=@CONTAINER_GID@
 
 # --------------------------------------------------------------- hardening
 DropCapability=all

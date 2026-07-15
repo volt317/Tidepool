@@ -5,10 +5,13 @@
 # agree with where the data actually lives (the spec's rule: never install
 # fixed-path Quadlets while creating data directories elsewhere).
 #
-#   TIDEPOOL_HOME    data root            (default ~/.local/share/tidepool)
-#   IMAGE_TAG        immutable image tag  (default 0.3.0-g<commit>)
-#   LISTEN_ADDR      proxy bind address   (default 127.0.0.1)
-#   LISTEN_PORT      proxy port           (default 8747)
+# Defaults come from deploy/deploy.yaml (the single location for values
+# multiple files must agree on); environment variables override per-run:
+#
+#   TIDEPOOL_HOME    data root
+#   IMAGE_TAG        immutable image tag  (default <version>-g<commit>)
+#   LISTEN_ADDR      proxy bind address
+#   LISTEN_PORT      proxy host port
 #
 # Renders into $OUT_DIR (default: deploy/quadlet/rendered), validates that
 # no placeholder survived, and — where the quadlet generator binary is
@@ -20,10 +23,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 TEMPLATES="$REPO/deploy/quadlet/templates"
 
-TIDEPOOL_HOME="${TIDEPOOL_HOME:-$HOME/.local/share/tidepool}"
-LISTEN_ADDR="${LISTEN_ADDR:-127.0.0.1}"
-LISTEN_PORT="${LISTEN_PORT:-8747}"
+# shellcheck source=lib/deploy-config.sh
+source "$HERE/lib/deploy-config.sh"
+TIDEPOOL_HOME="${TIDEPOOL_HOME:-$DEPLOY_CFG_DATA_ROOT}"
+LISTEN_ADDR="${LISTEN_ADDR:-$DEPLOY_CFG_LISTEN_ADDR}"
+LISTEN_PORT="${LISTEN_PORT:-$DEPLOY_CFG_LISTEN_PORT}"
+INTERNAL_PORT="${INTERNAL_PORT:-$DEPLOY_CFG_INTERNAL_PORT}"
+CONTAINER_UID="${CONTAINER_UID:-$DEPLOY_CFG_CONTAINER_UID}"
+CONTAINER_GID="${CONTAINER_GID:-$DEPLOY_CFG_CONTAINER_GID}"
+IMAGE_PREFIX="${IMAGE_PREFIX:-$DEPLOY_CFG_IMAGE_PREFIX}"
 OUT_DIR="${OUT_DIR:-$REPO/deploy/quadlet/rendered}"
+echo "render: configurables from $DEPLOY_CFG_SOURCE"
 
 if [ -z "${IMAGE_TAG:-}" ]; then
   commit="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)"
@@ -39,12 +49,15 @@ for tpl in "$TEMPLATES"/*.in; do
   out="$OUT_DIR/$(basename "${tpl%.in}")"
   sed \
     -e "s|@TIDEPOOL_HOME@|$TIDEPOOL_HOME|g" \
-    -e "s|@COLLECTOR_IMAGE@|localhost/tidepool-collector:$IMAGE_TAG|g" \
-    -e "s|@API_IMAGE@|localhost/tidepool-api:$IMAGE_TAG|g" \
-    -e "s|@SCHEDULER_IMAGE@|localhost/tidepool-scheduler:$IMAGE_TAG|g" \
-    -e "s|@PROXY_IMAGE@|localhost/tidepool-proxy:$IMAGE_TAG|g" \
+    -e "s|@COLLECTOR_IMAGE@|$IMAGE_PREFIX-collector:$IMAGE_TAG|g" \
+    -e "s|@API_IMAGE@|$IMAGE_PREFIX-api:$IMAGE_TAG|g" \
+    -e "s|@SCHEDULER_IMAGE@|$IMAGE_PREFIX-scheduler:$IMAGE_TAG|g" \
+    -e "s|@PROXY_IMAGE@|$IMAGE_PREFIX-proxy:$IMAGE_TAG|g" \
     -e "s|@LISTEN_ADDR@|$LISTEN_ADDR|g" \
     -e "s|@LISTEN_PORT@|$LISTEN_PORT|g" \
+    -e "s|@INTERNAL_PORT@|$INTERNAL_PORT|g" \
+    -e "s|@CONTAINER_UID@|$CONTAINER_UID|g" \
+    -e "s|@CONTAINER_GID@|$CONTAINER_GID|g" \
     -e "s|@APPARMOR_DIGEST@|$APPARMOR_DIGEST|g" \
     "$tpl" > "$out.tmp"
   mv "$out.tmp" "$out"
@@ -92,6 +105,12 @@ for q in /usr/lib/podman/quadlet /usr/libexec/podman/quadlet; do
   fi
 done
 
-echo "render: ${#rendered[@]} unit(s) → $OUT_DIR"
+# the host firewall template shares the port define
+sed -e "s|@LISTEN_PORT@|$LISTEN_PORT|g" "$REPO/deploy/nftables/tidepool.nft.in" > "$OUT_DIR/tidepool.nft"
+if command -v nft >/dev/null; then
+  nft -c -f "$OUT_DIR/tidepool.nft" && echo "render: nftables syntax OK" || { echo "render: nftables template failed syntax check" >&2; exit 1; }
+fi
+
+echo "render: ${#rendered[@]} unit(s) + tidepool.nft → $OUT_DIR"
 echo "render: images tagged $IMAGE_TAG; data root $TIDEPOOL_HOME; listener $LISTEN_ADDR:$LISTEN_PORT"
 echo "render: quadlet-set digest $QUADLET_DIGEST"

@@ -16,8 +16,11 @@
 #   ./backup.sh                 → $TIDEPOOL_HOME/backups/<stamp>/
 #   TIDEPOOL_HOME=… IMAGE_TAG=… ./backup.sh
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-config.sh
+source "$HERE/lib/deploy-config.sh"
 
-BASE="${TIDEPOOL_HOME:-$HOME/.local/share/tidepool}"
+BASE="${TIDEPOOL_HOME:-$DEPLOY_CFG_DATA_ROOT}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DEST="$BASE/backups/$STAMP"
 RETAIN="${RETAIN_VERIFIED:-14}"
@@ -45,7 +48,7 @@ fi
 # profile narrows writes to exactly the writer db's WAL/-shm files.
 # shellcheck disable=SC2086
 podman run --rm --network=none $APPARMOR_OPT \
-  --userns=keep-id:uid=10001,gid=10001 \
+  --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
   -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
   -v "$DEST":/var/lib/tidepool/exports:rw \
   "$UTILITY" \
@@ -68,7 +71,7 @@ latest_digests="$(ls -1t "$BASE"/exports/image-digests-*.json 2>/dev/null | head
 scratch="$(mktemp -d)"
 # shellcheck disable=SC2086
 podman run --rm --network=none \
-  --userns=keep-id:uid=10001,gid=10001 \
+  --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
   -v "$DEST":/var/lib/tidepool/exports:ro \
   -v "$scratch":/var/lib/tidepool/corpus:rw \
   "$UTILITY" \
