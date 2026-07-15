@@ -1,5 +1,9 @@
 # Tidepool
 
+<p align="center">
+  <img src="assets/banner.png" alt="Project Tidepool Banner Image"/>
+</p>
+
 Tidepool observes configured upstream surfaces, preserves what it saw as
 durable evidence, and lets projects be judged against that evidence — even
 offline:
