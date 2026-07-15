@@ -1,12 +1,17 @@
 {
-  "name": "tidepool-web",
+  "name": "tidepool",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Tidepool \u2014 distro-first change intelligence service (TypeScript): comprehensive per-distro package lists aggregated from each distro's information sources, GPG-verified where the distro signs.",
   "scripts": {
+    "generate:deploy-config": "node scripts/generate-deploy-config.mjs",
+    "check:deploy-config": "node scripts/generate-deploy-config.mjs --check",
+    "sync:locks": "./scripts/sync-component-locks.sh",
+    "check:locks": "./scripts/sync-component-locks.sh --check",
+    "check:node": "node scripts/assert-node24.mjs",
     "build:server": "node scripts/generate-deploy-config.mjs && tsc -p server",
-    "build:web": "npm run build --workspace web",
+    "build:web": "npm --prefix web run build",
     "build": "npm run build:server && npm run build:web",
     "typecheck": "tsc -p server --noEmit && tsc -p web",
     "lint": "eslint .",
@@ -19,11 +24,10 @@
     "start:collector": "node server/dist/server/src/services/collector.js",
     "start:api": "node server/dist/server/src/services/api.js",
     "start:scheduler": "node server/dist/server/src/services/scheduler.js",
-    "start:proxy": "tsx server/src/services/proxy.ts",
-    "admin": "tsx server/src/cli/admin.ts",
-    "retention": "tsx server/src/cli/retention.ts",
-    "generate:deploy-config": "node scripts/generate-deploy-config.mjs",
-    "sync:locks": "./scripts/sync-component-locks.sh"
+    "start:proxy": "node server/dist/server/src/services/proxy.js",
+    "admin": "node server/dist/server/src/cli/admin.js",
+    "retention": "node server/dist/server/src/cli/retention.js",
+    "tls": "node server/dist/server/src/cli/tls.js"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
@@ -34,7 +38,7 @@
     "typescript-eslint": "^8.0.0"
   },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=24"
   },
   "workspaces": [
     "server",
