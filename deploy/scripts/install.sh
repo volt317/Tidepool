@@ -100,10 +100,14 @@ install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-verify.timer "$TIMER_DIR
 
 # operator tooling next to the data — deploy.yaml and the loader travel with
 # the scripts so installed tooling reads the same values the units used
-install -m 755 "$HERE"/backup.sh "$HERE"/restore.sh "$HERE"/verify.sh "$HERE"/boundaries-verify.sh "$TIDEPOOL_HOME/bin/"
+install -m 755 "$HERE"/backup.sh "$HERE"/restore.sh "$HERE"/boundaries-verify.sh \
+  "$HERE"/verify.sh "$HERE"/verify-host.sh "$HERE"/verify-install.sh \
+  "$HERE"/verify-apparmor.sh "$HERE"/verify-deployment.sh "$HERE"/verify-corpus.sh \
+  "$TIDEPOOL_HOME/bin/"
 install -m 644 "$REPO/deploy/deploy.yaml" "$TIDEPOOL_HOME/bin/deploy.yaml"
 mkdir -p "$TIDEPOOL_HOME/bin/lib"
 install -m 644 "$HERE/lib/deploy-config.sh" "$TIDEPOOL_HOME/bin/lib/deploy-config.sh"
+install -m 644 "$HERE/lib/verify-lib.sh" "$TIDEPOOL_HOME/bin/lib/verify-lib.sh"
 
 systemctl --user daemon-reload
 

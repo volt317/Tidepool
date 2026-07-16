@@ -133,6 +133,122 @@ Deliberately **not** in this file: application behavior
 and per-service resource limits (each appears exactly once, in its unit
 template — no agreement problem to solve).
 
+## Service roles at a glance
+
+```
+collector   sole Internet egress · sole corpus writer · publishes an
+            atomically replaced read-only SQLite replica · control surface
+            is a Unix socket (run/collector-control.sock) — no TCP at all
+api         --network=none · reads the published replica SQLITE_OPEN_READONLY
+            plus objects/ and snapshots/ read-only · the writer directory is
+            absent from its mount namespace · listens on a Unix socket
+proxy       the only published TCP port (127.0.0.1:8747 by default) · holds
+            no data · forwards to the API's socket with size/time limits
+scheduler   --network=none · drives collection/snapshot/verification/
+            enrichment cadence from the validated config over the socket
+dispatch    ad-hoc jobs, --network=none, read-only project mounts
+```
+
+## Images and build discipline
+
+All five images come from one multi-target Containerfile,
+`deploy/oci/Containerfile` (targets: `collector`, `api`, `scheduler`,
+`proxy`, `utility` — the last carries the CLIs for dispatch, corpus
+export/import, and verification jobs). `install.sh` drives the build, but
+it is ordinary `podman build`:
+
+```sh
+BASE=$(deploy/scripts/pin-base.sh)          # resolves the node:24-bookworm-slim
+                                            # base to its CURRENT digest
+podman build -f deploy/oci/Containerfile --target collector \
+  --build-arg BASE_IMAGE="$BASE" \
+  --build-arg TIDEPOOL_VERSION=0.3.0 \
+  --build-arg TIDEPOOL_GIT_COMMIT=$(git rev-parse HEAD) \
+  -t localhost/tidepool-collector:0.3.0-g$(git rev-parse --short HEAD) .
+```
+
+Every shared build/deploy value — ports, uid/gid, base image tag, data
+root — comes from **`deploy/deploy.yaml`** (its consumption rules,
+compile-time TypeScript baking included, are detailed under
+[Configuration](../docs/CONFIGURATION.md)); the build reads it through the same
+loader and `--build-arg` lines as everything else.
+
+Image discipline, enforced rather than suggested: the base is pinned **by
+digest** at build time (CI fails builds that used the floating tag); local
+tags are immutable (`<version>-g<commit>` — rendered units never reference
+`:latest`, and `render.sh` refuses to emit one that does); the version/
+commit build args are baked as environment so every snapshot manifest and
+replica publication records the exact software identity that produced it;
+and `install.sh` writes the final image digests to
+`exports/image-digests-<tag>.json`. The collector image is the only one
+that adds a package (`gpgv`, for archive signature verification); the build
+stage compiles TypeScript and the frontend after one workspace-root
+`npm ci` (the project lock), and each runtime stage carries only
+`server/dist`, migrations, (API only) `web/dist`, and a production
+`node_modules` produced by a standalone
+`npm ci --omit=dev --workspaces=false` against `server/package-lock.json` —
+the per-component lock exists precisely for that step — the read-only root itself is the Quadlet unit's doing
+(`ReadOnly=true`), so even the collector image contains nothing writable
+at runtime beyond its mounted data trees and a `noexec` tmpfs.
+
+## Runtime units
+
+The runtime is **rootless Podman under user-level systemd via Quadlet**
+(Podman ≥ 4.4). Units are not hand-written: `deploy/scripts/render.sh`
+renders the templates in `deploy/quadlet/templates/` with this
+deployment's data root, image tag, and the `deploy/deploy.yaml`
+configurables — listener, ports, uid/gid — refusing unresolved
+placeholders, and additionally renders the host firewall policy
+(`tidepool.nft`) so its port define can never disagree with the unit's
+`PublishPort`; and `install.sh` places the result in
+`~/.config/containers/systemd/`, where the Quadlet generator turns each
+`.container` file into a systemd service:
+
+```sh
+systemctl --user start  tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler
+systemctl --user status tidepool-collector      # health, restarts, journal
+journalctl --user -u tidepool-collector -f      # structured JSON-line logs
+loginctl enable-linger $USER                    # keep running after logout
+```
+
+Every unit declares a read-only root filesystem, dropped capabilities,
+`NoNewPrivileges`, its AppArmor profile, pids/memory/cpu limits, a health
+check (the collector and API answer over their Unix sockets; the scheduler
+is checked by heartbeat-file freshness), restart-on-failure with startup
+rate limiting (`StartLimitBurst=5`/300s), and `TimeoutStopSec=120` so the
+collector's SIGTERM drain — finish in-flight observations, complete a
+pending replica publication, close the writer — always has room. Two
+systemd user timers (`tidepool-backup.timer` daily, `tidepool-verify.timer`
+weekly) run the operational jobs in confined utility containers.
+
+Host requirements: `podman` (≥ 4.4 for Quadlet) and a systemd user
+session; `apparmor_parser` and `nft` for the two host-side enforcement
+layers; `git` and Node 24 to build and to run the admin CLI from the
+checkout (`npm run admin` — or exec the same CLI inside the utility image
+if the host has no Node). Nothing on the host needs root except loading
+AppArmor profiles and nftables rules — the printed post-install steps.
+
+Each service has its own AppArmor profile (seven ship, including
+corpus-export/import for backup tooling), and a host nftables policy
+(rendered from `deploy/nftables/tidepool.nft.in`) narrows the collector to DNS + 443 —
+required, not optional, on hostile networks. Manual operations go through
+the admin CLI over the control socket:
+
+```sh
+npm run admin health | sync-all | snapshot | publish | enrich <d> <u> <pkg>
+npm run retention plan          # reachability-based pruning, dry-run default
+~/.local/share/tidepool/bin/verify.sh              # positive checks
+~/.local/share/tidepool/bin/boundaries-verify.sh   # negative checks: ~20
+                                                   # prohibited operations
+                                                   # attempted for real
+```
+
+Every isolation claim, the layer that enforces it, and the two honest
+limitations (per-user rootless egress; description-less replica listings)
+are tabled in `deploy/README.md`; ADR 0008 records the reasoning. API
+availability does not depend on the collector — once a replica is
+published, reads keep working with the collector stopped.
+
 ## Install
 
 ```bash
@@ -294,9 +410,20 @@ forwarded. `/healthz` and `/api/*` are forwarded to the API.
 
 ## Verification
 
-`verify.sh` — positive: units active, containers healthy, proxy answers,
-collector publishes no port, replica digest matches `publication.json`,
-corpus + snapshots structurally verify (in a confined utility container).
+`verify.sh` — positive checks, now an orchestrator over independently
+runnable pieces (each prints PASS/FAIL/SKIP and exits non-zero on FAIL):
+
+| Script | Checks |
+|---|---|
+| `verify-host.sh` | rootless podman present and functional |
+| `verify-install.sh` | host layout exists; corpus not world-readable |
+| `verify-apparmor.sh` | all seven profiles loaded (skips without AppArmor) |
+| `verify-deployment.sh` | units active, containers healthy, proxy answers, collector publishes no port, replica digest matches `publication.json` |
+| `verify-corpus.sh` | corpus + snapshots structurally verify (in a confined utility container, query-only) |
+| `verify-render.sh` | STRUCTURAL, needs no install: templates render with zero placeholders and no `:latest`, quadlet dry-run, rendered `tidepool.nft` passes `nft -c`, every AppArmor profile parses (`apparmor_parser -Q`) |
+
+`verify.sh` runs the first five in order; `verify-render.sh` is the
+preflight/CI piece and is not part of the live sequence.
 
 `boundaries-verify.sh` — negative: ~20 prohibited operations attempted for
 real (write the writer, open the authoritative DB, reach the Internet from
@@ -306,22 +433,21 @@ tagged with the enforcement layer under test. Success of any prohibited
 operation is an incident, and exits non-zero. `--json` emits the
 machine-readable report the weekly `tidepool-verify.timer` archives.
 
-Two CI workflows share one topology definition
-(`deploy/scripts/ci-topology.sh`). `appliance.yml` is the per-change gate:
-every invariant as its own named step — generated-config and lock drift,
-all five image builds, **no npm/compilers in any runtime image**
-(`verify-image-contents.sh`; the runtime base deletes what node:slim
-ships), immutable-tag validation, AppArmor compile+load, Quadlet render and
-generator dry-run, then one live topology session for the negative boundary
-suite, backup → clean-corpus restore → verify, and API availability with
-the collector stopped. `http-security.yml` is a focused gate: it generates a temporary local CA,
+CI covers this in two tiers. `structure.yml` is the slim per-change gate:
+generated-config drift, lock drift, and `verify-render.sh` (render,
+nftables, AppArmor parse) — no image builds, so it runs on every relevant
+PR in minutes. `deploy.yml` is the heavy integrated tier (weekly and
+on-demand): real image builds against `deploy/scripts/ci-topology.sh`,
+**no npm/compilers in any runtime image** (`verify-image-contents.sh`),
+one live topology session for the negative boundary suite, backup →
+clean-corpus restore → verify, and API availability with the collector
+stopped. `http-security.yml` is a focused gate: it generates a temporary local CA,
 starts the API and HTTPS proxy, and runs the admission matrix, security
 headers, TLS version policy, raw-socket smuggling-style framing tests, and
 CA-private-key confinement (`deploy/scripts/http-security-test.sh`, runnable
-locally). `deploy.yml` runs the integrated 19-step
-`ci-deploy-test.sh` scenario weekly and on demand, adding what the gate
-doesn't repeat: snapshot creation, offline dispatch, and the
-restore-then-compare-snapshot-digests round trip.
+locally). The 19-step `ci-deploy-test.sh`
+scenario inside `deploy.yml` also covers snapshot creation, offline
+dispatch, and the restore-then-compare-snapshot-digests round trip.
 
 ## Updating
 

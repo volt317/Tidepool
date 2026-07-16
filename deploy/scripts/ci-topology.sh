@@ -2,7 +2,7 @@
 # deploy/scripts/ci-topology.sh — start/stop the four-container Tidepool
 # topology with unit-equivalent podman run flags, for CI and workstation
 # testing. MOVED verbatim from ci-deploy-test.sh steps 7/18 so the explicit
-# appliance workflow and the integrated scenario share one definition
+# CI workflows and the integrated scenario share one definition
 # instead of drifting copies.
 #
 #   ci-topology.sh up   <image-tag>    prepare $TIDEPOOL_HOME, write the CI

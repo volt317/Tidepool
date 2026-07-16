@@ -1,7 +1,7 @@
 # Tidepool — Mission and Operating Modes
 
 This is the authoritative short statement of what Tidepool is and what it
-guarantees. Where deployment notes, ADRs, or the README go into mechanism,
+guarantees. Where deployment notes, ADRs, or the docs/ references go into mechanism,
 this document governs intent. It is deliberately brief.
 
 ## 1. Mission

@@ -107,6 +107,32 @@ if (haveWeb) cpSync(webDist, join(root, "web", "dist"), { recursive: true });
 const serverEntry = join(process.cwd(), "server", "dist", "server", "src", "index.js");
 if (!existsSync(serverEntry)) fail("server/dist missing — run `npm run build` first");
 
+// Upstream reachability preflight. A mirror being unavailable is a LEGITIMATE
+// smoke failure — aggregating upstream is the whole point — but it should
+// fail HERE, in seconds, with an unambiguous verdict line, rather than
+// minutes later inside a sync poll where it is indistinguishable from a
+// regression in the pipeline.
+const upstreams = [
+  "https://security.ubuntu.com/ubuntu/dists/noble-security/InRelease",
+  "https://registry.npmjs.org/express",
+  "https://registry.yarnpkg.com/express",
+];
+for (const url of upstreams) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 10000);
+  let unreachable = null;
+  try {
+    const res = await fetch(url, { method: "HEAD", signal: ctrl.signal });
+    if (!res.ok && res.status !== 405) unreachable = `answered ${res.status}`;
+  } catch (e) {
+    unreachable = e?.cause?.code ?? e.message;
+  } finally {
+    clearTimeout(t);
+  }
+  if (unreachable) fail(`UPSTREAM UNREACHABLE (not a code regression): ${url} — ${unreachable}`);
+  ok(`upstream reachable: ${new URL(url).host}`);
+}
+
 console.log(`smoke: root=${root} keyring=${existsSync(KEYRING) ? "present" : "MISSING"}`);
 const child = spawn(process.execPath, [serverEntry], {
   env: { ...process.env, TIDEPOOL_ROOT: root, TIDEPOOL_SERVE_STATIC: haveWeb ? "1" : "0" },

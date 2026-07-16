@@ -33,7 +33,10 @@ const C = {
   sand: "#E3C98F",
   kelp: "#3A6B60",
 };
-const display: CSSProperties = { fontFamily: "'Space Grotesk', system-ui, sans-serif" };
+// System stacks only — the console makes zero third-party requests (the
+// appliance posture is bounded egress; a UI that phones a font CDN would
+// contradict it). Hosts with the named fonts installed locally still get them.
+const display: CSSProperties = { fontFamily: "'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif" };
 const mono: CSSProperties = { fontFamily: "'IBM Plex Mono', ui-monospace, monospace" };
 
 const api = async <T,>(path: string, opts?: RequestInit): Promise<{ status: number; body: T & ApiExtra }> => {

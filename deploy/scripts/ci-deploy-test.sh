@@ -86,7 +86,7 @@ echo "units reference immutable tags only"
 
 step 7 "start independent containers (unit-equivalent podman run flags)"
 # topology definition moved verbatim to ci-topology.sh so the explicit
-# appliance workflow and this scenario share one set of run flags
+# CI workflows and this scenario share one set of run flags
 "$HERE/ci-topology.sh" up "$IMAGE_TAG"
 
 step 8 "bounded live collection (npm registry, one package)"

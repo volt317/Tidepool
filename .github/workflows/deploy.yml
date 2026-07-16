@@ -8,8 +8,9 @@
 # clean-corpus restore → snapshot digest comparison. See
 # deploy/scripts/ci-deploy-test.sh for the 19 numbered steps.
 #
-# Per-change gating is .github/workflows/appliance.yml (each invariant as
-# its own named step); this workflow runs the end-to-end scenario weekly —
+# Per-change gating of the cheap STRUCTURAL invariants is
+# .github/workflows/structure.yml; this workflow runs the end-to-end
+# scenario weekly —
 # catching upstream base-image and registry drift the way the collector
 # smoke catches upstream format drift — and on demand.
 name: deploy
