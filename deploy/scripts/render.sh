@@ -110,8 +110,25 @@ done
 
 # the host firewall template shares the port define
 sed -e "s|@LISTEN_PORT@|$LISTEN_PORT|g" "$REPO/deploy/nftables/tidepool.nft.in" > "$OUT_DIR/tidepool.nft"
+# nft -c initializes a kernel netlink cache, so even a pure check needs
+# CAP_NET_ADMIN — and this script refuses to run as root by design. Try
+# unprivileged, escalate the single check via passwordless sudo when
+# available, and otherwise say plainly that the check did not run (a
+# skipped check must never be reported as a passed one).
 if command -v nft >/dev/null; then
-  nft -c -f "$OUT_DIR/tidepool.nft" && echo "render: nftables syntax OK" || { echo "render: nftables template failed syntax check" >&2; exit 1; }
+  nft_out="$(nft -c -f "$OUT_DIR/tidepool.nft" 2>&1)" && nft_rc=0 || nft_rc=$?
+  if [ "$nft_rc" -ne 0 ] && grep -qi "not permitted" <<<"$nft_out" && sudo -n true 2>/dev/null; then
+    nft_out="$(sudo -n nft -c -f "$OUT_DIR/tidepool.nft" 2>&1)" && nft_rc=0 || nft_rc=$?
+  fi
+  if [ "$nft_rc" -eq 0 ]; then
+    echo "render: nftables syntax OK"
+  elif grep -qi "not permitted" <<<"$nft_out"; then
+    echo "render: nftables check SKIPPED — nft -c needs CAP_NET_ADMIN and no passwordless sudo is available; validate with: sudo nft -c -f $OUT_DIR/tidepool.nft"
+  else
+    echo "render: nftables template failed syntax check:" >&2
+    sed 's/^/render:   /' <<<"$nft_out" >&2
+    exit 1
+  fi
 fi
 
 echo "render: ${#rendered[@]} unit(s) + tidepool.nft → $OUT_DIR"
