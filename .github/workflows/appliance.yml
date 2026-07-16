@@ -96,6 +96,9 @@ jobs:
       - name: verify no runtime image includes npm or compilers
         run: ./deploy/scripts/verify-image-contents.sh "$IMAGE_TAG"
 
+      - name: verify every built image runs Node major 24
+        run: ./deploy/scripts/verify-image-node.sh "$IMAGE_TAG"
+
       - name: parse AppArmor profiles (compile-check all seven, then load)
         run: |
           apparmor_parser -Q deploy/apparmor/tidepool-*

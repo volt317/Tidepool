@@ -102,15 +102,20 @@ WORKDIR /app
 RUN groupadd -g 10001 tidepool && useradd -r -u 10001 -g 10001 -d /app -s /usr/sbin/nologin tidepool \
  && mkdir -p /var/lib/tidepool
 # the runtime base carries NO package manager and NO toolchain: node:slim
-# ships npm/npx/corepack, and "the profiles deny executing them" is weaker
+# ships npm/npx/corepack/yarn, and "the profiles deny executing them" is weaker
 # than "they do not exist" — remove them so the image-contents CI gate
 # (deploy/scripts/verify-image-contents.sh) can assert absence, not policy
-RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn*
+RUN rm -rf /usr/local/lib/node_modules \
+          /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+          /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn*
 
 COPY --from=build /src/server/dist          ./server/dist
 COPY --from=build /src/server/node_modules  ./server/node_modules
 COPY --from=build /src/server/migrations    ./server/migrations
 COPY --from=build /src/server/package.json  ./server/package.json
+# Prove the Node baked into this image is major 24 — not a CI variable, the
+# actual runtime binary every target inherits. Fails the build otherwise.
+RUN node -e 'const m=+process.versions.node.split(".")[0];if(m!==24){console.error("FAIL: image Node major "+m+" != 24");process.exit(1)}console.log("image Node "+process.versions.node+" (major 24)")'
 USER 10001:10001
 # no ENTRYPOINT here: each target pins its exact process
 
@@ -147,7 +152,7 @@ CMD ["node", "server/dist/server/src/services/proxy.js"]
 
 # ------------------------------------------------------------------ scheduler
 # Base as-is: it owns no data and fetches nothing — it only dials the
-# collector's pod-internal control endpoint.
+# collector's control socket (a Unix domain socket, not a network endpoint).
 FROM base AS scheduler
 CMD ["node", "server/dist/server/src/services/scheduler.js"]
 

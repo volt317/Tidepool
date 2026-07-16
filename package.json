@@ -10,6 +10,7 @@
     "sync:locks": "./scripts/sync-component-locks.sh",
     "check:locks": "./scripts/sync-component-locks.sh --check",
     "check:node": "node scripts/assert-node24.mjs",
+    "check:image-node": "./deploy/scripts/verify-image-node.sh",
     "build:server": "node scripts/generate-deploy-config.mjs && tsc -p server",
     "build:web": "npm --prefix web run build",
     "build": "npm run build:server && npm run build:web",

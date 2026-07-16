@@ -1,6 +1,7 @@
 {
   "name": "tidepool-frontend",
   "private": true,
+  "_internalVersioning": "internal component; version is independent of the product version (source of truth: root package.json). Not published.",
   "type": "module",
   "version": "0.1.0",
   "scripts": {

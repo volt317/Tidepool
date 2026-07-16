@@ -31,9 +31,10 @@ trigger collection (its sync/snapshot routes answer 405 by design). The
 single-process development mode (`npm start`) still accepts the same
 operations as HTTP POSTs for convenience.
 
-(`examples/` holds a small deterministic snapshot + dispatch artifact
-produced by this exact pipeline; `docs/adr/` records the architecture
-decisions.)
+(`docs/OVERVIEW.md` is the short authoritative statement of the mission,
+operating modes, and appliance guarantees; `examples/` holds a small
+deterministic snapshot + dispatch artifact produced by this exact pipeline;
+`docs/adr/` records the individual architecture decisions.)
 
 
 **A self-hosted upstream survey service.** Tidepool runs one contained
@@ -380,7 +381,7 @@ export/import, and verification jobs). `install.sh` drives the build, but
 it is ordinary `podman build`:
 
 ```sh
-BASE=$(deploy/scripts/pin-base.sh)          # resolves the node:22-bookworm-slim
+BASE=$(deploy/scripts/pin-base.sh)          # resolves the node:24-bookworm-slim
                                             # base to its CURRENT digest
 podman build -f deploy/oci/Containerfile --target collector \
   --build-arg BASE_IMAGE="$BASE" \
@@ -445,7 +446,7 @@ weekly) run the operational jobs in confined utility containers.
 
 Host requirements: `podman` (≥ 4.4 for Quadlet) and a systemd user
 session; `apparmor_parser` and `nft` for the two host-side enforcement
-layers; `git` and Node ≥ 22.13 to build and to run the admin CLI from the
+layers; `git` and Node 24 to build and to run the admin CLI from the
 checkout (`npm run admin` — or exec the same CLI inside the utility image
 if the host has no Node). Nothing on the host needs root except loading
 AppArmor profiles and nftables rules — the printed post-install steps.
@@ -515,8 +516,8 @@ Seven workflows under `.github/workflows/` (validated with actionlint):
   built frontend is served. Advisory/enrichment sources are disabled in the
   smoke config so only security.ubuntu.com and the npm registries can affect
   the verdict. The smoke runs locally too: `npm run build && npm run smoke`.
-- **test** — the unit suite with coverage thresholds on a Node 22/24
-  matrix; the lcov report is uploaded as an artifact.
+- **test** — the unit suite with coverage thresholds on Node 24; the lcov
+  report is uploaded as an artifact.
 - **codeql** — CodeQL analysis (javascript-typescript, security-and-quality
   suite) on pushes, PRs, and a weekly schedule. The suite was run locally
   against this tree with the CodeQL 2.26.0 CLI during development: it found
@@ -530,9 +531,10 @@ Seven workflows under `.github/workflows/` (validated with actionlint):
   `js/http-to-file-access` (fetched InRelease bytes are written to a private
   temp file precisely so gpgv can verify them).
 
-Lint runs on a Node 22/24 matrix; build, smoke, and the runtime target
-Node 24 (active LTS). The service requires Node >= 22.13 (`node:sqlite`
-unflagged; declared in `engines`).
+Lint, build, smoke, and the runtime image all target Node 24, single-sourced
+from `.node-version` (`node-version-file`) so no workflow duplicates the
+version. The service requires Node 24 (`node:sqlite` is unflagged there;
+declared in `engines`, enforced by `engine-strict=true`).
 - **appliance** — the per-change deployment gate, one named step per
   invariant: generated deploy-config and component-lock drift checks, all
   five OCI targets built from a digest-pinned base, **no npm or compilers
