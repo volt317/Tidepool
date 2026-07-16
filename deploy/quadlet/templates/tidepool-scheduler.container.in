@@ -38,7 +38,7 @@ HealthRetries=3
 HealthStartPeriod=20s
 HealthTimeout=5s
 
-StopTimeout=15
+PodmanArgs=--stop-timeout=15
 
 [Service]
 Restart=on-failure

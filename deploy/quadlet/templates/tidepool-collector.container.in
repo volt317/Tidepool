@@ -72,7 +72,7 @@ HealthTimeout=5s
 # SIGTERM → drain in-flight observations (≤90s), finish a pending replica
 # publication, close the writer. TimeoutStopSec gives headroom over the
 # service's internal 110s deadline.
-StopTimeout=115
+PodmanArgs=--stop-timeout=115
 
 [Service]
 Restart=on-failure
