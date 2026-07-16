@@ -101,7 +101,11 @@ jobs:
 
       - name: parse AppArmor profiles (compile-check all seven, then load)
         run: |
-          apparmor_parser -Q deploy/apparmor/tidepool-*
+          # -K (skip-cache): the compile-check runs unprivileged and must not
+          # try to write the shared cache at /var/cache/apparmor (root-owned on
+          # the runner) — that write is what failed with "Permission denied".
+          # Compilation is still fully exercised; only caching is skipped.
+          apparmor_parser -Q -K deploy/apparmor/tidepool-*
           echo "7 profiles compile"
           sudo apparmor_parser -r deploy/apparmor/tidepool-* && echo "profiles loaded — topology steps run CONFINED"
 

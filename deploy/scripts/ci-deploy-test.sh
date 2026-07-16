@@ -54,7 +54,9 @@ echo "pinned: ${BASE_IMAGE##*@}"
 
 step 3 "compile AppArmor profiles"
 if command -v apparmor_parser >/dev/null; then
-  apparmor_parser -Q "$REPO"/deploy/apparmor/tidepool-* && echo "7 profiles compile"
+  # -K (skip-cache): compile-check runs unprivileged; do not write the
+  # root-owned /var/cache/apparmor cache (that write fails "Permission denied").
+  apparmor_parser -Q -K "$REPO"/deploy/apparmor/tidepool-* && echo "7 profiles compile"
   APPARMOR_LOADED=0
   if [ -w /sys/kernel/security/apparmor/.load ] || sudo -n true 2>/dev/null; then
     if sudo apparmor_parser -r "$REPO"/deploy/apparmor/tidepool-* 2>/dev/null; then

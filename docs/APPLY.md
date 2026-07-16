@@ -1,40 +1,24 @@
-# Tidepool Alignment — how to apply
+# Fix: AppArmor "Failed setting up policy cache … Permission denied" in CI
 
-Generated against live main 0143843. Two ways:
+Cause: `apparmor_parser -Q` (compile-check, skip kernel load) still tries to
+SAVE compiled profiles to /var/cache/apparmor, which is root-owned on the
+runner. The unprivileged compile-check can't write there, so it fails before
+the later `sudo apparmor_parser -r` load ever runs.
 
-## Option A — patch (handles deletions automatically)
-    git am < ../tidepool-alignment.patch
+Fix: add `-K` (--skip-cache) to the compile-only checks. Compilation is fully
+exercised; only the cache write is skipped. The sudo load line is unchanged.
+
+Two files changed (same one-flag fix in each):
+  .github/workflows/appliance.yml      (the step you saw fail)
+  deploy/scripts/ci-deploy-test.sh     (same pattern, would fail the same way)
+
+## Option A — patch
+    git am < ../fix-apparmor-cache.patch
     git push
 
-## Option B — copy files, then delete the stale ones by hand
-This tree mirrors the repo. Copy each file to the same path in your repo:
+## Option B — copy these two files over the ones in your repo, then:
+    chmod +x deploy/scripts/ci-deploy-test.sh   # preserve exec bit
+    git add -A && git commit && git push
 
-    .gitignore                              (NEW — main had none)
-    .npmrc                                  (NEW — engine-strict=true)
-    README.md                               (Node 22 language removed)
-    package.json                            (+check:image-node script)
-    server/package.json                     (marked internal versioning)
-    web/package.json                        (marked internal versioning)
-    deploy/oci/Containerfile                (yarn symlinks + Node-24 image proof)
-    deploy/scripts/verify-image-node.sh     (NEW — make executable: chmod +x)
-    docs/OVERVIEW.md                        (NEW — authoritative mission doc)
-    .github/workflows/appliance.yml         (+verify-image-node step)
-
-Then DELETE these stale shared-pod files (superseded by
-deploy/quadlet/templates/*.in; nothing references them):
-
-    git rm deploy/quadlet/tidepool.pod \
-           deploy/quadlet/tidepool-api.container \
-           deploy/quadlet/tidepool-collector.container \
-           deploy/quadlet/tidepool-scheduler.container
-
-Then:  chmod +x deploy/scripts/verify-image-node.sh && git add -A && git commit && git push
-
-## Verify after applying (on a Node 24 machine / CI)
-    npm ci
-    npm run build && npm test
-    npm run check:deploy-config && npm run check:locks
-    # image proof runs in CI: appliance.yml → verify-image-node.sh (node major 24 inside each image)
-
-Note: .npmrc engine-strict=true makes `npm install` REFUSE on Node < 24.
-That is the intended enforcement, not a bug — use Node 24.
+## Verify
+    grep -rn "apparmor_parser -Q" .github/ deploy/    # every hit should be "-Q -K"
