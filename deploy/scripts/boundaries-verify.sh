@@ -55,7 +55,7 @@ echo "== Tidepool boundary verification (negative tests) =="
 # ---------------------------------------------------------------- API suite
 if require_running tidepool-api; then
   X tidepool-api node -e 'require("fs").writeFileSync("/var/lib/tidepool/corpus/writer/x","")'
-  record api write-writer-corpus $? "mount-set+apparmor" "writer/ is not mounted and is denied by name"
+  record api write-writer-corpus $? "mount-set" "writer/ is not mounted and is denied by name"
 
   X tidepool-api node -e 'const{DatabaseSync}=require("node:sqlite");const d=new DatabaseSync("/var/lib/tidepool/corpus/writer/tidepool.sqlite3");d.exec("SELECT 1")'
   record api open-writable-authoritative-db $? "mount-set" "no path to the authoritative database exists in this namespace"
@@ -64,16 +64,23 @@ if require_running tidepool-api; then
   record api write-published-replica $? "ro-mount+sqlite-readonly" "published/ is a read-only mount; connections are SQLITE_OPEN_READONLY"
 
   X tidepool-api node -e 'require("fs").readdirSync("/var/lib/tidepool/keyrings")'
-  record api read-keyrings $? "mount-set+apparmor" "keyrings are not mounted and are denied by profile"
+  record api read-keyrings $? "mount-set" "keyrings are not mounted and are denied by profile"
 
   X tidepool-api node -e 'require("fs").readdirSync("/var/lib/tidepool/cache")'
-  record api read-collector-cache $? "mount-set+apparmor" "the TTL cache is private collector state"
+  record api read-collector-cache $? "mount-set" "the TTL cache is private collector state"
 
   X tidepool-api timeout 8 node -e 'fetch("https://example.com").then(()=>process.exit(0),()=>process.exit(1))'
   record api reach-internet $? "network-none" "the container has no network namespace connectivity"
 
-  X tidepool-api /bin/sh -c 'true'
-  record api execute-shell $? "apparmor" "only node may execute"
+  # apparmor-only boundary: exec restriction has NO second layer. Under the
+  # default rootless deployment the profile cannot bind (ADR 0011), so this
+  # is asserted only when the container is actually confined.
+  if [ "$(podman inspect -f '{{.AppArmorProfile}}' tidepool-api 2>/dev/null)" = "tidepool-api" ]; then
+    X tidepool-api /bin/sh -c 'true'
+    record api execute-shell $? "apparmor (optional hardening)" "only node may execute"
+  else
+    printf 'SKIP  api execute-shell — apparmor not applied (optional hardening; exec restriction has no second layer)\n'
+  fi
 
   # invariant 10 exercised end-to-end through the real listener
   code="$(podman exec tidepool-api node -e 'require("http").request({socketPath:"/var/lib/tidepool/run/api.sock",path:"/api/domains/code/units/any/sync",method:"POST"},r=>{console.log(r.statusCode);process.exit(0)}).on("error",()=>{console.log(0);process.exit(0)}).end()' 2>/dev/null)"
@@ -84,10 +91,10 @@ fi
 # ---------------------------------------------------------- scheduler suite
 if require_running tidepool-scheduler; then
   X tidepool-scheduler node -e 'require("fs").readdirSync("/var/lib/tidepool/corpus")'
-  record scheduler read-corpus $? "mount-set+apparmor" "no corpus tree exists in this namespace"
+  record scheduler read-corpus $? "mount-set" "no corpus tree exists in this namespace"
 
   X tidepool-scheduler node -e 'require("fs").readdirSync("/var/lib/tidepool/keyrings")'
-  record scheduler read-keyrings $? "mount-set+apparmor" "keyrings are not mounted"
+  record scheduler read-keyrings $? "mount-set" "keyrings are not mounted"
 
   X tidepool-scheduler timeout 8 node -e 'fetch("https://example.com").then(()=>process.exit(0),()=>process.exit(1))'
   record scheduler reach-internet $? "network-none" "no network namespace connectivity"
@@ -112,22 +119,22 @@ if require_running tidepool-collector; then
   record collector read-dispatch-mounts $? "mount-set" "project paths belong to dispatch jobs, never the collector"
 
   X tidepool-collector node -e 'require("fs").readdirSync("/root")'
-  record collector read-host-paths $? "mount-set+apparmor" "no host paths beyond the declared mounts"
+  record collector read-host-paths $? "mount-set" "no host paths beyond the declared mounts"
 fi
 
 # -------------------------------------------------------------- proxy suite
 if require_running tidepool-proxy; then
   X tidepool-proxy node -e 'require("fs").readdirSync("/var/lib/tidepool/corpus")'
-  record proxy read-corpus $? "mount-set+apparmor" "the network-facing process holds no data"
+  record proxy read-corpus $? "mount-set" "the network-facing process holds no data"
 
   X tidepool-proxy node -e 'require("fs").readdirSync("/var/lib/tidepool/published")'
-  record proxy read-published $? "mount-set+apparmor" "not even the replica — the proxy forwards bytes, it does not read truth"
+  record proxy read-published $? "mount-set" "not even the replica — the proxy forwards bytes, it does not read truth"
 
   X tidepool-proxy node -e 'require("http").request({socketPath:"/var/lib/tidepool/run/collector-control.sock",path:"/healthz"},()=>process.exit(0)).on("error",()=>process.exit(1)).end()'
   record proxy dial-collector-control $? "socket-permissions" "control socket is not the proxy's to dial"
 
   X tidepool-proxy node -e 'require("fs").readFileSync("/var/lib/tidepool/tls/ca/tidepool-local-ca.key")'
-  record proxy read-ca-private-key $? "mount-set+apparmor" "the CA private key is never mounted into the proxy (only tls/server/ is)"
+  record proxy read-ca-private-key $? "mount-set" "the CA private key is never mounted into the proxy (only tls/server/ is)"
 
   # the proxy MUST be able to read its own server key (positive: absence of
   # this would break TLS) — recorded as a hold when the read SUCCEEDS

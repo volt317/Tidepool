@@ -54,12 +54,17 @@ FROM ${BASE_IMAGE} AS build
 WORKDIR /src
 
 # dependency layers first for cache efficiency
-COPY package.json package-lock.json ./
+# .npmrc carries engine-strict=true: the Node-version floor must hold INSIDE
+# the image build too, failing at `npm ci` in seconds — not at the final
+# image-node tripwire after a full compile on the wrong runtime.
+COPY .npmrc package.json package-lock.json ./
 COPY server/package.json server/package-lock.json ./server/
 COPY web/package.json web/package-lock.json ./web/
 # workspace root install: one lock, all components, hoisted — this is the
 # BUILD toolchain (tsc, vite, types); the runtime images never see it
-RUN npm ci --no-audit --no-fund
+# --ignore-scripts: no dependency here needs lifecycle scripts, and this
+# closes the npm install-time code-execution class entirely at build time.
+RUN npm ci --ignore-scripts --no-audit --no-fund
 
 COPY shared ./shared
 COPY server ./server
@@ -73,7 +78,7 @@ RUN npm run build \
  # component's own lock (server/package-lock.json) — deterministic with no
  # monorepo knowledge; --workspaces=false keeps npm from resolving against
  # the workspace root. This is the per-component lock's entire job.
- && cd server && npm ci --omit=dev --workspaces=false --no-audit --no-fund
+ && cd server && npm ci --ignore-scripts --omit=dev --workspaces=false --no-audit --no-fund
 
 # ---------------------------------------------------------------------- base
 # Shared runtime: node + compiled server + production deps + migrations.

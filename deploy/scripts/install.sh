@@ -103,6 +103,7 @@ install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-verify.timer "$TIMER_DIR
 install -m 755 "$HERE"/backup.sh "$HERE"/restore.sh "$HERE"/boundaries-verify.sh \
   "$HERE"/verify.sh "$HERE"/verify-host.sh "$HERE"/verify-install.sh \
   "$HERE"/verify-apparmor.sh "$HERE"/verify-deployment.sh "$HERE"/verify-corpus.sh \
+  "$HERE"/uninstall.sh \
   "$TIDEPOOL_HOME/bin/"
 install -m 644 "$REPO/deploy/deploy.yaml" "$TIDEPOOL_HOME/bin/deploy.yaml"
 mkdir -p "$TIDEPOOL_HOME/bin/lib"
@@ -115,14 +116,16 @@ cat <<NEXT
 
 == install complete — remaining ROOT steps (printed, not performed) ==
 
-1. AppArmor profiles (all seven; complain-mode first if you prefer):
-     sudo install -m 644 $REPO/deploy/apparmor/tidepool-{collector,api,scheduler,proxy,dispatch,corpus-export,corpus-import} /etc/apparmor.d/
-     sudo apparmor_parser -r /etc/apparmor.d/tidepool-*
-
-2. Host firewall (REQUIRED on hostile networks — edit uid/resolvers/subnet;
-   the port was rendered from deploy.yaml):
-     \$EDITOR $REPO/deploy/quadlet/rendered/tidepool.nft
-     sudo nft -f $REPO/deploy/quadlet/rendered/tidepool.nft
+1. OPTIONAL HARDENING (see deploy/README.md "Optional hardening" and ADR
+   0011 for why these layers matter and when they can actually bind):
+     - AppArmor profiles ship in deploy/apparmor/ but CANNOT be applied by
+       rootless podman (refused on every current version); they bind only
+       under rootful podman or outside-in confinement.
+     - Host firewall: deploy/quadlet/rendered/tidepool.nft narrows the
+       appliance user's egress to DNS+443. STRONGLY recommended on hostile
+       networks — but it constrains the whole uid, so run Tidepool under a
+       dedicated user account first, then edit uid/resolvers/subnet and:
+         sudo nft -f $REPO/deploy/quadlet/rendered/tidepool.nft
 
 3. Keyrings: copy the archive keyrings your config references into
      $TIDEPOOL_HOME/keyrings/

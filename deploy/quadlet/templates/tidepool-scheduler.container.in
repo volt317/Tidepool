@@ -26,7 +26,7 @@ Network=none
 UserNS=keep-id:uid=@CONTAINER_UID@,gid=@CONTAINER_GID@
 DropCapability=all
 NoNewPrivileges=true
-PodmanArgs=--security-opt apparmor=tidepool-scheduler --pids-limit=64
+PodmanArgs=--pids-limit=64
 PodmanArgs=--memory=128m --cpus=0.25 --ulimit=nofile=512:512
 
 Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@

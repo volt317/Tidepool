@@ -16,14 +16,14 @@ source "$HERE/lib/deploy-config.sh"
 source "$HERE/lib/verify-lib.sh"
 verify_lib_resolve_base
 
-if [[ -d /sys/kernel/security/apparmor ]] && grep -q "^tidepool-corpus-export " /sys/kernel/security/apparmor/profiles 2>/dev/null; then
-  APPARMOR_VERIFY_OPT="--security-opt apparmor=tidepool-corpus-export"
-fi
+# No apparmor security-opt here: rootless podman refuses custom profiles
+# (ADR 0011) — passing one when profiles are loaded would fail the very
+# machines that applied the optional hardening. Isolation for this job is
+# --network=none + the read-only-intent connection.
 UTILITY="$(podman images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' 2>/dev/null | grep '^localhost/tidepool-utility:' | sort -k2 -r | head -1 | cut -d' ' -f1)"
 if [[ -n "$UTILITY" && -f "$BASE/corpus/writer/tidepool.sqlite3" ]]; then
   # shellcheck disable=SC2086
   out=$(podman run --rm --network=none \
-      ${APPARMOR_VERIFY_OPT:-} \
       -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
       --userns=keep-id:uid="$DEPLOY_CFG_CONTAINER_UID",gid="$DEPLOY_CFG_CONTAINER_GID" \
       "$UTILITY" node --input-type=module -e '

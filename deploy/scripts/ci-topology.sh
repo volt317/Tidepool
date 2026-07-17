@@ -23,9 +23,11 @@ MODE="${1:?usage: ci-topology.sh up <image-tag> | down}"
 : "${TIDEPOOL_HOME:?TIDEPOOL_HOME must be exported}"
 
 AA() {
-  if [ -e /sys/kernel/security/apparmor/profiles ] && grep -q "^$1 " /sys/kernel/security/apparmor/profiles 2>/dev/null; then
-    echo "--security-opt apparmor=$1"
-  fi
+  # AppArmor opts deliberately not emitted: rootless podman refuses custom
+  # profiles on every version to date (containers/common IsSupported()
+  # short-circuits on IsRootless) — see ADR 0011. The old conditional here
+  # silently degraded in CI, masking exactly that.
+  :
 }
 
 up() {

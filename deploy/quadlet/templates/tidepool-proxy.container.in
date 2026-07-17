@@ -35,7 +35,7 @@ PublishPort=@LISTEN_ADDR@:@LISTEN_PORT@:@INTERNAL_PORT@
 UserNS=keep-id:uid=@CONTAINER_UID@,gid=@CONTAINER_GID@
 DropCapability=all
 NoNewPrivileges=true
-PodmanArgs=--security-opt apparmor=tidepool-proxy --pids-limit=64
+PodmanArgs=--pids-limit=64
 PodmanArgs=--memory=128m --cpus=0.5 --ulimit=nofile=2048:2048
 
 # in-container bind must be the netns wildcard for the published-port path;

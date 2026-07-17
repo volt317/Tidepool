@@ -7,7 +7,6 @@
 #
 #   verify-host.sh        rootless podman present and functional
 #   verify-install.sh     host layout exists with sane permissions
-#   verify-apparmor.sh    profiles loaded (skips if AppArmor absent)
 #   verify-deployment.sh  units active, containers healthy, collector
 #                         publishes no port, API healthz, publication coherent
 #   verify-corpus.sh      sqlite integrity + verifyCorpus + snapshot digests
@@ -18,7 +17,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 FAIL=0
-for part in verify-host.sh verify-install.sh verify-apparmor.sh verify-deployment.sh verify-corpus.sh; do
+# verify-apparmor.sh is NOT in the default sequence: the AppArmor layer is
+# optional hardening (rootless podman cannot apply it — ADR 0011); run it
+# standalone if you applied the profiles under a rootful deployment.
+for part in verify-host.sh verify-install.sh verify-deployment.sh verify-corpus.sh; do
   "$HERE/$part" || FAIL=1
 done
 

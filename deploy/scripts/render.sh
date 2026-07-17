@@ -116,12 +116,15 @@ sed -e "s|@LISTEN_PORT@|$LISTEN_PORT|g" "$REPO/deploy/nftables/tidepool.nft.in" 
 # available, and otherwise say plainly that the check did not run (a
 # skipped check must never be reported as a passed one).
 if command -v nft >/dev/null; then
-  nft_out="$(nft -c -f "$OUT_DIR/tidepool.nft" 2>&1)" && nft_rc=0 || nft_rc=$?
-  if [ "$nft_rc" -ne 0 ] && grep -qi "not permitted" <<<"$nft_out" && sudo -n true 2>/dev/null; then
-    nft_out="$(sudo -n nft -c -f "$OUT_DIR/tidepool.nft" 2>&1)" && nft_rc=0 || nft_rc=$?
+  nft_via=""
+  nft_out="$(LC_ALL=C nft -c -f "$OUT_DIR/tidepool.nft" 2>&1)" && nft_rc=0 || nft_rc=$?
+  if [ "$nft_rc" -ne 0 ] && grep -qi "not permitted" <<<"$nft_out" \
+      && [ "${TIDEPOOL_VERIFY_NO_SUDO:-0}" != "1" ] && sudo -n true 2>/dev/null; then
+    nft_via=" (via sudo)"
+    nft_out="$(sudo -n env LC_ALL=C nft -c -f "$OUT_DIR/tidepool.nft" 2>&1)" && nft_rc=0 || nft_rc=$?
   fi
   if [ "$nft_rc" -eq 0 ]; then
-    echo "render: nftables syntax OK"
+    echo "render: nftables syntax OK$nft_via"
   elif grep -qi "not permitted" <<<"$nft_out"; then
     echo "render: nftables check SKIPPED — nft -c needs CAP_NET_ADMIN and no passwordless sudo is available; validate with: sudo nft -c -f $OUT_DIR/tidepool.nft"
   else

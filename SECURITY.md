@@ -16,7 +16,7 @@ rather than a public issue — particularly anything touching:
   erase recorded evidence is the most severe class of issue for this
   project);
 * the appliance isolation boundaries (collector-only egress, read-only API,
-  the Unix control socket, AppArmor/nftables enforcement);
+  the Unix control socket, and any optional hardening you have applied per deploy/README.md);
 * signature/digest verification of upstream sources (a way to make an
   unverified source report `signature+digest`);
 * snapshot digest integrity (two different corpora yielding one digest, or

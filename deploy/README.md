@@ -40,22 +40,63 @@ listed here is a convention, not a guarantee.
 
 | Claim | Enforced by |
 |---|---|
-| API cannot reach the Internet | `Network=none` (no network namespace exists) **and** AppArmor `deny network inet/inet6` |
-| Scheduler cannot reach the Internet | same two layers |
+| API cannot reach the Internet | `Network=none` — no network namespace exists |
+| Scheduler cannot reach the Internet | `Network=none` |
 | Dispatch cannot reach the Internet | `--network=none` per job |
-| API cannot touch the authoritative DB | writer directory absent from its mount namespace **and** AppArmor `deny /var/lib/tidepool/corpus/writer/** ` by name **and** its only DB connection is `SQLITE_OPEN_READONLY` against the replica |
-| API cannot write published/objects/snapshots | `:ro` mounts **and** AppArmor read-only rules |
+| API cannot touch the authoritative DB | writer directory absent from its mount namespace **and** its only DB connection is `SQLITE_OPEN_READONLY` against the replica |
+| API cannot write published/objects/snapshots | `:ro` mounts |
 | Collector accepts no inbound TCP | no `PublishPort` in its unit (verified: `podman port` empty) — its control surface is a Unix socket, mode 0660 |
-| Proxy holds no data | only `run/`, `config/`, and `tls/server/` exist in its mount namespace; AppArmor denies the rest by name |
+| Proxy holds no data | only `run/`, `config/`, and `tls/server/` exist in its mount namespace |
 | Only declared HTTP requests reach the API | proxy admission gate: deny-by-default route manifest, method/body/query/framing checks (`shared/httpPolicy.ts`) — anything unlisted is 404/405, mutation verbs never appear |
 | HTTP mutation is impossible in appliance mode | the manifest omits mutation routes **and** the API independently 405s every non-GET/HEAD (defense in depth) |
-| Proxy never holds the CA private key | only `tls/server/` (cert+key+chain) is mounted; `tls/ca/` is not, and AppArmor `deny /var/lib/tidepool/tls/ca/**` — `boundaries-verify.sh` and `tls verify` both assert it |
+| Proxy never holds the CA private key | only `tls/server/` (cert+key+chain) is mounted; `tls/ca/` is not — `boundaries-verify.sh` and `tls verify` both assert it |
 | TLS is modern | proxy sets `minVersion: TLSv1.2`; the http-security job asserts TLS 1.0/1.1 rejected, 1.2/1.3 accepted |
-| Only node executes (any container) | AppArmor `deny …sh x`, `deny /usr/bin/** x` (collector additionally allows `gpgv`) |
 | Collection can't be triggered from the API | the API has no route to the control socket in code, and answers 405; control requires filesystem access to the socket (admin CLI or scheduler) |
-| Collector egress limited to DNS+443 | **host nftables** (rendered `tidepool.nft`) — a REQUIRED layer on hostile networks, because rootless egress is user-level traffic |
-| Proxy originates no Internet traffic | its *code* dials only the fixed socket path; nftables drops other egress from the appliance user. AppArmor cannot distinguish inbound accept from outbound connect on inet sockets — stated, not papered over |
 | Evidence can't be silently created by UI clicks | enrichment happens only in the collector and is recorded as observations; the API serves stored evidence only |
+
+Claims the default deployment does NOT make (they require the optional
+hardening below): "only node may execute inside a container" (was
+AppArmor-only; a shell inside a container still executes — the walls around
+that shell are the mount matrix, `Network=none`, and keep-id), and
+"collector egress is limited to DNS+443" (host nftables; without it,
+collector egress is ordinary user traffic).
+
+## Optional hardening — and why these layers matter
+
+Two enforcement layers ship in this repository but are NOT part of the
+default rootless deployment. They are not decoration; each closes a class
+the core layers do not:
+
+**AppArmor (`deploy/apparmor/`)** is the only layer that constrains
+*syscalls by program*, independent of namespaces and mounts: it is what
+turned "the API has no network namespace" into "the API cannot open an
+inet socket even if a unit regression restored one", and it is the sole
+enforcement behind "only node executes". It cannot be applied here because
+rootless podman categorically refuses custom profiles — every current
+version short-circuits on rootlessness before consulting the kernel (ADR
+0011 has the source citation). The kernel itself permits unprivileged
+entry into a pre-loaded profile (`aa-exec -p tidepool-api -- true` proves
+it); the refusal is podman policy, not physics. The profiles bind under a
+rootful deployment, and outside-in confinement (systemd
+`AppArmorProfile=` / an `aa-exec` wrapper, with wrapper profiles that also
+account for podman and pasta) is a plausible but UNVERIFIED path.
+
+**nftables (`deploy/nftables/tidepool.nft.in`, rendered by the install)**
+is the only egress control the collector has: rootless container traffic
+is ordinary user-level traffic at the host, so without these rules a
+compromised collector may connect anywhere, not just to DNS and 443.
+The layer works fine — root loads it; podman is never involved — but it
+constrains the *entire uid*, so applied to a login account it will confine
+your shell, your package manager, and your day. Deploy Tidepool under a
+dedicated user account, then edit the three site values (uid, resolvers,
+LAN subnet) in the rendered file and `sudo nft -f` it. On a hostile
+network, treat this layer as required in fact even though the install no
+longer requires it in form.
+
+If you apply either layer: `verify-apparmor.sh` (standalone) checks
+profiles are loaded, `verify-render.sh` parse-checks both artifact sets on
+every change so they cannot rot, and `boundaries-verify.sh` asserts the
+exec restriction only when a container is actually confined.
 
 Two honest limitations worth knowing before deployment:
 - **Rootless egress is per-user, not per-container.** The nftables rules
@@ -417,13 +458,22 @@ runnable pieces (each prints PASS/FAIL/SKIP and exits non-zero on FAIL):
 |---|---|
 | `verify-host.sh` | rootless podman present and functional |
 | `verify-install.sh` | host layout exists; corpus not world-readable |
-| `verify-apparmor.sh` | all seven profiles loaded (skips without AppArmor) |
+| `verify-apparmor.sh` | (standalone, optional hardening) profiles loaded |
 | `verify-deployment.sh` | units active, containers healthy, proxy answers, collector publishes no port, replica digest matches `publication.json` |
 | `verify-corpus.sh` | corpus + snapshots structurally verify (in a confined utility container, query-only) |
 | `verify-render.sh` | STRUCTURAL, needs no install: templates render with zero placeholders and no `:latest`, quadlet dry-run, rendered `tidepool.nft` passes `nft -c`, every AppArmor profile parses (`apparmor_parser -Q`) |
 
 `verify.sh` runs the first five in order; `verify-render.sh` is the
 preflight/CI piece and is not part of the live sequence.
+
+Privilege note: `nft -c` needs CAP_NET_ADMIN even as a pure check, so
+`verify-render.sh` and `render.sh` re-run only the two read-only,
+fixed-argv kernel-facing checks (`nft -c`, `apparmor_parser -Q`) through
+non-interactive `sudo -n` when an unprivileged run fails. This exercises a
+passwordless grant the invoking user already holds — it never prompts and
+grants nothing new. Escalated checks are marked `(via sudo)` in output,
+and `TIDEPOOL_VERIFY_NO_SUDO=1` disables escalation (permission-blocked
+checks then SKIP with a stated reason rather than reporting a result).
 
 `boundaries-verify.sh` — negative: ~20 prohibited operations attempted for
 real (write the writer, open the authoritative DB, reach the Internet from
@@ -462,3 +512,15 @@ Old image tags remain until pruned (`podman image prune`), so rollback is
 `systemctl --user stop …`, re-render with the previous `IMAGE_TAG`, start.
 Take a backup before updating (or enable the `ExecStartPre=` line in the
 collector unit to make that automatic).
+
+## Removal
+
+`deploy/scripts/uninstall.sh` backtracks the install with the same stance
+install.sh takes: unprivileged removals performed (services, timers, unit
+files, containers, images, installed tooling), root removals printed
+(AppArmor profiles, the nftables table, any ufw rule, linger). The data
+root — corpus, backups, config, keyrings, exports — is **preserved by
+default**; `--purge-data` deletes it after a typed-path confirmation
+(`TIDEPOOL_UNINSTALL_FORCE=1` for non-interactive use), and `--keep-images`
+retains the built images. The script is idempotent: re-running it reports
+what is already absent and exits cleanly.

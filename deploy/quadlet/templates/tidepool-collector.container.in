@@ -50,7 +50,7 @@ UserNS=keep-id:uid=@CONTAINER_UID@,gid=@CONTAINER_GID@
 # --------------------------------------------------------------- hardening
 DropCapability=all
 NoNewPrivileges=true
-PodmanArgs=--security-opt apparmor=tidepool-collector --pids-limit=256
+PodmanArgs=--pids-limit=256
 PodmanArgs=--memory=1g --cpus=2.0 --ulimit=nofile=4096:4096
 
 # ------------------------------------------------------------ environment

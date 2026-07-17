@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# deploy/scripts/verify-apparmor.sh — AppArmor profiles loaded on this host.
+# deploy/scripts/verify-apparmor.sh — OPTIONAL-HARDENING check: are the
+# Tidepool AppArmor profiles loaded on this host?
+#
+# Not part of verify.sh's default sequence: rootless podman cannot apply
+# custom profiles (ADR 0011), so loaded profiles only bind under a rootful
+# deployment or outside-in confinement. Run this standalone if you applied
+# that hardening.
 #
 #   verify apparmor      profiles loaded (skips if AppArmor absent)
 set -uo pipefail
