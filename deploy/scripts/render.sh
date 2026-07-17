@@ -43,8 +43,6 @@ if [ -z "${IMAGE_TAG:-}" ]; then
   IMAGE_TAG="${version}-g${commit}"
 fi
 
-# profile digest: identity of the AppArmor profile set that should be loaded
-APPARMOR_DIGEST="$(cat "$REPO"/deploy/apparmor/tidepool-* 2>/dev/null | sha256sum | cut -d' ' -f1 || echo unknown)"
 
 mkdir -p "$OUT_DIR"
 rendered=()
@@ -61,7 +59,6 @@ for tpl in "$TEMPLATES"/*.in; do
     -e "s|@INTERNAL_PORT@|$INTERNAL_PORT|g" \
     -e "s|@CONTAINER_UID@|$CONTAINER_UID|g" \
     -e "s|@CONTAINER_GID@|$CONTAINER_GID|g" \
-    -e "s|@APPARMOR_DIGEST@|$APPARMOR_DIGEST|g" \
     "$tpl" > "$out.tmp"
   mv "$out.tmp" "$out"
   rendered+=("$out")
@@ -109,30 +106,6 @@ for q in /usr/lib/podman/quadlet /usr/libexec/podman/quadlet; do
 done
 
 # the host firewall template shares the port define
-sed -e "s|@LISTEN_PORT@|$LISTEN_PORT|g" "$REPO/deploy/nftables/tidepool.nft.in" > "$OUT_DIR/tidepool.nft"
-# nft -c initializes a kernel netlink cache, so even a pure check needs
-# CAP_NET_ADMIN — and this script refuses to run as root by design. Try
-# unprivileged, escalate the single check via passwordless sudo when
-# available, and otherwise say plainly that the check did not run (a
-# skipped check must never be reported as a passed one).
-if command -v nft >/dev/null; then
-  nft_via=""
-  nft_out="$(LC_ALL=C nft -c -f "$OUT_DIR/tidepool.nft" 2>&1)" && nft_rc=0 || nft_rc=$?
-  if [ "$nft_rc" -ne 0 ] && grep -qi "not permitted" <<<"$nft_out" \
-      && [ "${TIDEPOOL_VERIFY_NO_SUDO:-0}" != "1" ] && sudo -n true 2>/dev/null; then
-    nft_via=" (via sudo)"
-    nft_out="$(sudo -n env LC_ALL=C nft -c -f "$OUT_DIR/tidepool.nft" 2>&1)" && nft_rc=0 || nft_rc=$?
-  fi
-  if [ "$nft_rc" -eq 0 ]; then
-    echo "render: nftables syntax OK$nft_via"
-  elif grep -qi "not permitted" <<<"$nft_out"; then
-    echo "render: nftables check SKIPPED — nft -c needs CAP_NET_ADMIN and no passwordless sudo is available; validate with: sudo nft -c -f $OUT_DIR/tidepool.nft"
-  else
-    echo "render: nftables template failed syntax check:" >&2
-    sed 's/^/render:   /' <<<"$nft_out" >&2
-    exit 1
-  fi
-fi
 
 echo "render: ${#rendered[@]} unit(s) + tidepool.nft → $OUT_DIR"
 echo "render: images tagged $IMAGE_TAG; data root $TIDEPOOL_HOME; listener $LISTEN_ADDR:$LISTEN_PORT"

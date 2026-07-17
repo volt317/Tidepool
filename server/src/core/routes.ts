@@ -19,7 +19,7 @@
 // (server/src/index.ts) and the existing tests see the identical surface
 // they always did.
 
-import { Router } from "express";
+import { Router } from "../http/index.js";
 import type { Aggregator } from "./aggregator.js";
 import type { SnapshotStore } from "./snapshot.js";
 import { buildReadRouter } from "./routes.read.js";

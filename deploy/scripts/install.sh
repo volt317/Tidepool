@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy/scripts/install.sh — build and install the isolated-appliance
 # deployment: independent rootless containers, digest-pinned base, immutable
-# image tags, rendered Quadlet units, AppArmor profiles, timers.
+# image tags, rendered Quadlet units, timers.
 #
 #   TIDEPOOL_HOME   data root (default ~/.local/share/tidepool)
 #   LISTEN_ADDR     proxy bind address (default 127.0.0.1 — set a trusted
@@ -9,8 +9,7 @@
 #   LISTEN_PORT     proxy port (default 8747)
 #
 # What this script does NOT do (deliberately):
-#   * load AppArmor profiles (needs root — prints the exact commands)
-#   * install nftables rules (site-specific — prints where they are)
+#   * apply host-side network policy (site-specific — operator's domain)
 #   * start services (operators review rendered units first)
 set -euo pipefail
 
@@ -102,7 +101,7 @@ install -m 644 "$REPO"/deploy/quadlet/rendered/tidepool-verify.timer "$TIMER_DIR
 # the scripts so installed tooling reads the same values the units used
 install -m 755 "$HERE"/backup.sh "$HERE"/restore.sh "$HERE"/boundaries-verify.sh \
   "$HERE"/verify.sh "$HERE"/verify-host.sh "$HERE"/verify-install.sh \
-  "$HERE"/verify-apparmor.sh "$HERE"/verify-deployment.sh "$HERE"/verify-corpus.sh \
+  "$HERE"/verify-deployment.sh "$HERE"/verify-corpus.sh \
   "$HERE"/uninstall.sh \
   "$TIDEPOOL_HOME/bin/"
 install -m 644 "$REPO/deploy/deploy.yaml" "$TIDEPOOL_HOME/bin/deploy.yaml"
@@ -116,32 +115,21 @@ cat <<NEXT
 
 == install complete — remaining ROOT steps (printed, not performed) ==
 
-1. OPTIONAL HARDENING (see deploy/README.md "Optional hardening" and ADR
-   0011 for why these layers matter and when they can actually bind):
-     - AppArmor profiles ship in deploy/apparmor/ but CANNOT be applied by
-       rootless podman (refused on every current version); they bind only
-       under rootful podman or outside-in confinement.
-     - Host firewall: deploy/quadlet/rendered/tidepool.nft narrows the
-       appliance user's egress to DNS+443. STRONGLY recommended on hostile
-       networks — but it constrains the whole uid, so run Tidepool under a
-       dedicated user account first, then edit uid/resolvers/subnet and:
-         sudo nft -f $REPO/deploy/quadlet/rendered/tidepool.nft
-
-3. Keyrings: copy the archive keyrings your config references into
+1. Keyrings: copy the archive keyrings your config references into
      $TIDEPOOL_HOME/keyrings/
 
-3b. TLS (if http.tls.mode is generated-local-ca, the default for LAN use):
+2. TLS (if http.tls.mode is generated-local-ca, the default for LAN use):
      npm run tls init                     # creates the local CA + server cert
      npm run tls export-ca > tidepool-ca.crt   # install on LAN clients
    The CA private key stays under $TIDEPOOL_HOME/tls/ca/ and is never
    mounted into the proxy (only tls/server/ is).
 
-4. Review, then start (independent services — no pod):
+3. Review, then start (independent services — no pod):
      systemctl --user start tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler
      systemctl --user enable tidepool-backup.timer tidepool-verify.timer
      loginctl enable-linger \$USER   # survive logout
 
-5. Verify the deployment AND its boundaries:
+4. Verify the deployment AND its boundaries:
      $TIDEPOOL_HOME/bin/verify.sh
      $TIDEPOOL_HOME/bin/boundaries-verify.sh
 NEXT

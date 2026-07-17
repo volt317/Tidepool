@@ -26,8 +26,8 @@
 //   - API availability does not depend on the collector: once a valid
 //     replica exists, reads keep working with the collector stopped.
 
-import express from "express";
-import rateLimit from "express-rate-limit";
+import express, { type Request, type Response, type Router } from "../http/index.js";
+import { rateLimit } from "../http/index.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -52,7 +52,7 @@ if (!initial.config) {
 
 interface Built {
   config: TidepoolConfig;
-  router: express.Router;
+  router: Router;
   replica: ReplicaHandle;
   publishedDir: string;
   dataDir: string;
@@ -106,7 +106,7 @@ app.use((req, _res, next) => {
   }
   next();
 });
-app.use(express.json({ limit: "256kb" }));
+app.use(express.json({ limit: 262_144 }));
 
 const general = rateLimit({ windowMs: 60_000, limit: 600, standardHeaders: true, legacyHeaders: false });
 app.use("/api", general);
@@ -175,7 +175,7 @@ app.post("/api/reload", (_req, res) => {
 
 // control operations are NOT part of this surface (invariant 10): honest
 // 405s so the web UI's buttons explain themselves instead of half-working
-const notHere = (what: string) => (_req: express.Request, res: express.Response) =>
+const notHere = (what: string) => (_req: Request, res: Response) =>
   res.status(405).json({
     error: `${what} is an administrative operation, not an API route`,
     how: "use the admin CLI against the collector control socket (see deploy/README.md), or let the scheduler run it on policy",

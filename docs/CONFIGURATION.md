@@ -89,7 +89,7 @@ How it is consumed — deliberately never by a running service:
   into the committed `shared/deployConfig.generated.ts`; the compiled
   services carry them as static consts and never open the YAML at runtime.
 - **Everything downstream is rendered from it**: the Quadlet units'
-  `PublishPort`/uid mappings and the nftables `proxy_port` define come out
+  `PublishPort`/uid mappings come out
   of the same render pass, so they cannot disagree with each other or with
   the compiled fallbacks.
 

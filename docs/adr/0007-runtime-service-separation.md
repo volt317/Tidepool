@@ -10,7 +10,7 @@ generation, dispatch analysis, and presentation at the module level
 single process: `server/src/index.ts` hosted upstream collection, the
 SQLite writer, snapshot creation, the REST read surface, and the frontend
 behind one port. A hardened deployment (rootless Podman + Quadlet +
-AppArmor, `deploy/`) wants those responsibilities in separately privileged
+`deploy/`) wants those responsibilities in separately privileged
 processes: the network-facing service should not be the process that can
 write evidence or reach upstream, and the process that parses untrusted
 upstream bytes should not be reachable from the network.
@@ -64,7 +64,7 @@ the frontend is unchanged.
 ## Consequences
 
 Each service now carries only its own privileges (see `deploy/README.md`
-for the full matrix and the AppArmor profiles for per-permission
+for the full matrix for per-permission
 justifications), and each is independently restartable: the API keeps
 serving evidence while the collector is down (control operations answer
 503, truthfully). Snapshot creation lives in the collector because manifest

@@ -39,10 +39,6 @@ fi
 
 UTILITY="${UTILITY:-$(podman images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' | grep '^localhost/tidepool-utility:' | sort -k2 -r | head -1 | cut -d' ' -f1)}"
 [ -n "$UTILITY" ] || { echo "restore: no tidepool-utility image"; exit 1; }
-APPARMOR_OPT=""
-if [ -e /sys/kernel/security/apparmor/profiles ] && grep -q tidepool-corpus-import /sys/kernel/security/apparmor/profiles 2>/dev/null; then
-  APPARMOR_OPT="--security-opt apparmor=tidepool-corpus-import"
-fi
 
 run_import() {
   # shellcheck disable=SC2086
@@ -50,7 +46,6 @@ run_import() {
     --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
     -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
     -v "$(dirname "$BUNDLE")":/restore:ro \
-    ${APPARMOR_OPT:-} \
     "$UTILITY" \
     node /app/server/dist/server/src/cli/corpus.js import \
       --data /var/lib/tidepool/corpus \
@@ -63,7 +58,7 @@ run_import --dry-run
 echo "==> importing"
 run_import
 echo "==> verifying restored corpus"
-podman run --rm --network=none ${APPARMOR_OPT:-} \
+podman run --rm --network=none \
   --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
   -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
   "$UTILITY" \

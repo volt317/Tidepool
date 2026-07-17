@@ -14,8 +14,8 @@
 #   config ro      — declared sources; immutable at runtime
 #   keyrings ro    — host-owned archive trust anchors for gpgv
 #   /tmp tmpfs     — gpgv scratch; noexec,nosuid
-#   network        — outbound HTTPS/DNS (host nftables narrows this further:
-#                    deploy/nftables/tidepool.nft is a REQUIRED layer on
+#   network        — outbound HTTPS/DNS (host-side network policy, if any,
+#                    is the operator's domain on
 #                    hostile networks)
 
 [Unit]
@@ -38,7 +38,7 @@ Volume=@TIDEPOOL_HOME@/corpus:/var/lib/tidepool/corpus:rw
 Volume=@TIDEPOOL_HOME@/cache:/var/lib/tidepool/cache:rw
 Volume=@TIDEPOOL_HOME@/published:/var/lib/tidepool/published:rw
 Volume=@TIDEPOOL_HOME@/run:/var/lib/tidepool/run:rw
-# SELinux hosts: append :Z to Volume= lines (AppArmor hosts must NOT).
+# SELinux hosts: append :Z to Volume= lines (non-SELinux hosts must NOT).
 
 # --------------------------------------------------------------- network
 # Default rootless network for OUTBOUND only — no PublishPort here, ever.
@@ -56,7 +56,6 @@ PodmanArgs=--memory=1g --cpus=2.0 --ulimit=nofile=4096:4096
 # ------------------------------------------------------------ environment
 # Paths are baked in the image; only provenance identity is set here.
 Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
-Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
 # Optional GitHub enrichment token — prefer a Podman secret over config:
 #   podman secret create tidepool-github-token -   (paste, ^D)
 # Secret=tidepool-github-token,type=env,target=TIDEPOOL_GITHUB_TOKEN

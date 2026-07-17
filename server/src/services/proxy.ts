@@ -5,7 +5,7 @@
 //
 // Layered model (this process owns exactly ONE layer):
 //   host firewall / netns   → who can reach the port     (NOT us)
-//   AppArmor / mounts       → process + fs authority      (NOT us)
+//   mount matrix            → process + fs authority      (NOT us)
 //   >>> THIS: HTTP admission → is this a valid Tidepool request?
 //   API (over UDS)          → application semantics       (downstream)
 //

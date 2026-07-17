@@ -11,7 +11,7 @@
 # not running.
 #
 # Every test names the enforcement layer it exercises, so a failure message
-# says which layer regressed (mount set, network namespace, AppArmor,
+# says which layer regressed (mount set, network namespace,
 # SQLite mode, or published-port set).
 set -uo pipefail
 
@@ -72,15 +72,6 @@ if require_running tidepool-api; then
   X tidepool-api timeout 8 node -e 'fetch("https://example.com").then(()=>process.exit(0),()=>process.exit(1))'
   record api reach-internet $? "network-none" "the container has no network namespace connectivity"
 
-  # apparmor-only boundary: exec restriction has NO second layer. Under the
-  # default rootless deployment the profile cannot bind (ADR 0011), so this
-  # is asserted only when the container is actually confined.
-  if [ "$(podman inspect -f '{{.AppArmorProfile}}' tidepool-api 2>/dev/null)" = "tidepool-api" ]; then
-    X tidepool-api /bin/sh -c 'true'
-    record api execute-shell $? "apparmor (optional hardening)" "only node may execute"
-  else
-    printf 'SKIP  api execute-shell — apparmor not applied (optional hardening; exec restriction has no second layer)\n'
-  fi
 
   # invariant 10 exercised end-to-end through the real listener
   code="$(podman exec tidepool-api node -e 'require("http").request({socketPath:"/var/lib/tidepool/run/api.sock",path:"/api/domains/code/units/any/sync",method:"POST"},r=>{console.log(r.statusCode);process.exit(0)}).on("error",()=>{console.log(0);process.exit(0)}).end()' 2>/dev/null)"
@@ -100,10 +91,8 @@ if require_running tidepool-scheduler; then
   record scheduler reach-internet $? "network-none" "no network namespace connectivity"
 
   X tidepool-scheduler timeout 5 node -e 'require("net").createServer().listen(9999,"0.0.0.0",()=>{require("http").get("http://127.0.0.1:9999",()=>{}).on("error",()=>{});setTimeout(()=>process.exit(0),500)}).on("error",()=>process.exit(1))'
-  record scheduler tcp-listen-meaningful $? "network-none+apparmor" "inet sockets are denied by profile; the namespace has no external reachability"
+  record scheduler tcp-listen-meaningful $? "network-none" "the namespace has no external reachability"
 
-  X tidepool-scheduler /bin/sh -c 'true'
-  record scheduler execute-shell $? "apparmor" "only node may execute"
 fi
 
 # ---------------------------------------------------------- collector suite
@@ -112,8 +101,6 @@ if require_running tidepool-collector; then
   [ "$ports" -eq 0 ]; rc=$?
   record collector published-tcp-port "$([ $rc -eq 0 ] && echo 1 || echo 0)" "quadlet" "podman port must list nothing (listed: $ports)"
 
-  X tidepool-collector /bin/sh -c 'true'
-  record collector execute-shell $? "apparmor" "only node and gpgv may execute"
 
   X tidepool-collector node -e 'require("fs").readdirSync("/project")'
   record collector read-dispatch-mounts $? "mount-set" "project paths belong to dispatch jobs, never the collector"
@@ -145,8 +132,6 @@ if require_running tidepool-proxy; then
     record proxy read-own-server-key 1 "mount-set" "server key not present (TLS disabled in this run)"
   fi
 
-  X tidepool-proxy /bin/sh -c 'true'
-  record proxy execute-shell $? "apparmor" "only node may execute"
 fi
 
 # ----------------------------------------------------------- dispatch suite

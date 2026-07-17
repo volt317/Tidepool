@@ -38,17 +38,11 @@ fi
 [[ -f "$BASE/corpus/writer/tidepool.sqlite3" ]] || { echo "backup: no corpus at $BASE/corpus/writer — nothing to do"; exit 0; }
 mkdir -p "$DEST"
 
-APPARMOR_OPT=""
-if [ -e /sys/kernel/security/apparmor/profiles ] && grep -q tidepool-corpus-export /sys/kernel/security/apparmor/profiles 2>/dev/null; then
-  APPARMOR_OPT="--security-opt apparmor=tidepool-corpus-export"
-fi
 
 # corpus is mounted rw because reading a live WAL database requires -shm
 # cooperation (shared-memory index) — the export takes a consistent copy via
-# the SQLite backup API and writes nothing else; the corpus-export AppArmor
-# profile narrows writes to exactly the writer db's WAL/-shm files.
 # shellcheck disable=SC2086
-podman run --rm --network=none $APPARMOR_OPT \
+podman run --rm --network=none \
   --userns=keep-id:uid=$DEPLOY_CFG_CONTAINER_UID,gid=$DEPLOY_CFG_CONTAINER_GID \
   -v "$BASE/corpus":/var/lib/tidepool/corpus:rw \
   -v "$DEST":/var/lib/tidepool/exports:rw \

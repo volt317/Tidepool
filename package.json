@@ -31,7 +31,6 @@
     "tls": "node server/dist/server/src/cli/tls.js"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
     "@types/node": "^24.0.0",
     "eslint": "^9.0.0",
     "eslint-plugin-react-hooks": "^5.0.0",

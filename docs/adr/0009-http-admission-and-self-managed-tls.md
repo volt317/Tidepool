@@ -11,7 +11,7 @@ permissive — it accepts any method, any path, any body, any framing, and
 speaks plaintext. The appliance needs a protocol admission layer that
 decides, for a connection that has *already reached* the listener, whether
 it is a valid Tidepool request — without duplicating or claiming to replace
-packet-level controls (firewall, network namespaces, AppArmor), which
+packet-level controls (firewalls, network namespaces), which
 remain the source of truth for reachability.
 
 ## Decision
@@ -55,11 +55,11 @@ layer: protocol admission.
 ## Consequences
 
 - The proxy's mount set grows by exactly one read-only subtree
-  (`tls/server/`); its AppArmor profile denies `tls/ca/**` by name.
+  (`tls/server/`).
 - Development mode keeps plaintext-on-loopback and the mutation routes, and
   warns that appliance HTTP guarantees are not active; standalone and
   appliance modes share the manifest.
 - Honest boundary: the proxy holds a network namespace with outbound routes
   (rootless has no inbound-only mode), so "no egress" for it remains a
-  code + nftables property, not a container flag — unchanged from ADR 0008
+  code-level property, not a container flag — unchanged from ADR 0008
   and restated here. The HTTP layer makes no packet-level claim at all.

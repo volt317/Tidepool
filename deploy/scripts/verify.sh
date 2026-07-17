@@ -11,15 +11,11 @@
 #                         publishes no port, API healthz, publication coherent
 #   verify-corpus.sh      sqlite integrity + verifyCorpus + snapshot digests
 #
-# verify-render.sh (structural: templates/nftables/apparmor parse) needs no
 # install and is not part of the live sequence — CI runs it per change.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 FAIL=0
-# verify-apparmor.sh is NOT in the default sequence: the AppArmor layer is
-# optional hardening (rootless podman cannot apply it — ADR 0011); run it
-# standalone if you applied the profiles under a rootful deployment.
 for part in verify-host.sh verify-install.sh verify-deployment.sh verify-corpus.sh; do
   "$HERE/$part" || FAIL=1
 done

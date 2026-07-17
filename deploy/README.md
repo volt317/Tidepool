@@ -9,7 +9,7 @@ Independent rootless Podman containers. One rule above all others:
 
 ```
 Internet
-   │  outbound HTTPS/DNS only (nftables-narrowed; no inbound port at all)
+   │  outbound HTTPS/DNS only (no inbound port at all)
    ▼
 ┌──────────────┐   writes    corpus/writer/tidepool.sqlite3  (sole writer)
 │  collector   │──────────▶  corpus/objects, corpus/snapshots, exports
@@ -54,59 +54,11 @@ listed here is a convention, not a guarantee.
 | Collection can't be triggered from the API | the API has no route to the control socket in code, and answers 405; control requires filesystem access to the socket (admin CLI or scheduler) |
 | Evidence can't be silently created by UI clicks | enrichment happens only in the collector and is recorded as observations; the API serves stored evidence only |
 
-Claims the default deployment does NOT make (they require the optional
-hardening below): "only node may execute inside a container" (was
-AppArmor-only; a shell inside a container still executes — the walls around
-that shell are the mount matrix, `Network=none`, and keep-id), and
-"collector egress is limited to DNS+443" (host nftables; without it,
-collector egress is ordinary user traffic).
-
-## Optional hardening — and why these layers matter
-
-Two enforcement layers ship in this repository but are NOT part of the
-default rootless deployment. They are not decoration; each closes a class
-the core layers do not:
-
-**AppArmor (`deploy/apparmor/`)** is the only layer that constrains
-*syscalls by program*, independent of namespaces and mounts: it is what
-turned "the API has no network namespace" into "the API cannot open an
-inet socket even if a unit regression restored one", and it is the sole
-enforcement behind "only node executes". It cannot be applied here because
-rootless podman categorically refuses custom profiles — every current
-version short-circuits on rootlessness before consulting the kernel (ADR
-0011 has the source citation). The kernel itself permits unprivileged
-entry into a pre-loaded profile (`aa-exec -p tidepool-api -- true` proves
-it); the refusal is podman policy, not physics. The profiles bind under a
-rootful deployment, and outside-in confinement (systemd
-`AppArmorProfile=` / an `aa-exec` wrapper, with wrapper profiles that also
-account for podman and pasta) is a plausible but UNVERIFIED path.
-
-**nftables (`deploy/nftables/tidepool.nft.in`, rendered by the install)**
-is the only egress control the collector has: rootless container traffic
-is ordinary user-level traffic at the host, so without these rules a
-compromised collector may connect anywhere, not just to DNS and 443.
-The layer works fine — root loads it; podman is never involved — but it
-constrains the *entire uid*, so applied to a login account it will confine
-your shell, your package manager, and your day. Deploy Tidepool under a
-dedicated user account, then edit the three site values (uid, resolvers,
-LAN subnet) in the rendered file and `sudo nft -f` it. On a hostile
-network, treat this layer as required in fact even though the install no
-longer requires it in form.
-
-If you apply either layer: `verify-apparmor.sh` (standalone) checks
-profiles are loaded, `verify-render.sh` parse-checks both artifact sets on
-every change so they cannot rot, and `boundaries-verify.sh` asserts the
-exec restriction only when a container is actually confined.
-
-Two honest limitations worth knowing before deployment:
-- **Rootless egress is per-user, not per-container.** The nftables rules
-  constrain the *appliance user*; run Tidepool under a dedicated account so
-  "the user's egress" and "the collector's egress" are the same statement.
-- **Replica-served package listings carry no description text** — package
-  descriptions are not part of normalized index records, so the read model
-  reconstructed from published truth omits them (versions, drift,
-  advisories, components are all present). Advisory rows reconstructed from
-  the corpus carry no click-through URL.
+Honest limitations stated plainly: the deployment does not restrict which
+programs may execute inside a container beyond what the mount matrix and
+image contents allow, and collector egress leaves the host as ordinary
+user-level traffic — host-side network policy is the operator's domain and
+outside this project's scope.
 
 ## Host layout (`$TIDEPOOL_HOME`, default `~/.local/share/tidepool`)
 
@@ -116,7 +68,7 @@ subuid mappings — so the data root is the *appliance user's* XDG data dir,
 owned and operated without a privileged installer. `/var/lib/tidepool`
 exists only as the fixed **in-container** mount target, deliberately
 decoupled from wherever the host keeps the data. Run Tidepool under a
-dedicated unprivileged account (the nftables policy already assumes one);
+dedicated unprivileged account;
 every script that touches the data root refuses to run as root, because a
 sudo'd invocation would silently resolve `~` to `/root` and build a
 parallel tree (`TIDEPOOL_ALLOW_ROOT=1` plus an explicit `TIDEPOOL_HOME`
@@ -165,9 +117,6 @@ disagree. The shell scripts' reads happen when *those scripts* run
 service.
 `install.sh` copies the file (and the loader) into `$TIDEPOOL_HOME/bin/`,
 so installed backup/restore/verify tooling reads the same values the units
-were rendered from. The host firewall is rendered from
-`deploy/nftables/tidepool.nft.in` with the same port, then hand-edited for
-the three genuinely site-specific defines (uid, resolvers, LAN subnet).
 
 Deliberately **not** in this file: application behavior
 (`tidepool.config.json`, validated), the release version (`package.json`),
@@ -253,7 +202,7 @@ loginctl enable-linger $USER                    # keep running after logout
 ```
 
 Every unit declares a read-only root filesystem, dropped capabilities,
-`NoNewPrivileges`, its AppArmor profile, pids/memory/cpu limits, a health
+`NoNewPrivileges`, pids/memory/cpu limits, a health
 check (the collector and API answer over their Unix sockets; the scheduler
 is checked by heartbeat-file freshness), restart-on-failure with startup
 rate limiting (`StartLimitBurst=5`/300s), and `TimeoutStopSec=120` so the
@@ -263,17 +212,9 @@ systemd user timers (`tidepool-backup.timer` daily, `tidepool-verify.timer`
 weekly) run the operational jobs in confined utility containers.
 
 Host requirements: `podman` (≥ 4.4 for Quadlet) and a systemd user
-session; `apparmor_parser` and `nft` for the two host-side enforcement
-layers; `git` and Node 24 to build and to run the admin CLI from the
-checkout (`npm run admin` — or exec the same CLI inside the utility image
+session.
 if the host has no Node). Nothing on the host needs root except loading
-AppArmor profiles and nftables rules — the printed post-install steps.
 
-Each service has its own AppArmor profile (seven ship, including
-corpus-export/import for backup tooling), and a host nftables policy
-(rendered from `deploy/nftables/tidepool.nft.in`) narrows the collector to DNS + 443 —
-required, not optional, on hostile networks. Manual operations go through
-the admin CLI over the control socket:
 
 ```sh
 npm run admin health | sync-all | snapshot | publish | enrich <d> <u> <pkg>
@@ -298,9 +239,8 @@ published, reads keep working with the collector stopped.
                                          # installs, prints the root steps
 ```
 
-Then perform the printed root steps: load the seven AppArmor profiles,
-adapt and load the rendered `deploy/quadlet/rendered/tidepool.nft`, copy keyrings, review the
-rendered units in `~/.config/containers/systemd/`, and start:
+Then perform the printed steps: copy keyrings, initialize TLS if enabled,
+review the rendered units in `~/.config/containers/systemd/`, and start:
 
 ```bash
 systemctl --user start tidepool-collector tidepool-api tidepool-proxy tidepool-scheduler
@@ -309,8 +249,7 @@ loginctl enable-linger $USER
 ```
 
 The listener defaults to `127.0.0.1:8747`. For a trusted LAN:
-`LISTEN_ADDR=192.168.1.20 ./deploy/scripts/install.sh` — and mirror the
-subnet into the nftables `lan_clients` define. TLS/mTLS or reverse-proxy
+`LISTEN_ADDR=192.168.1.20 ./deploy/scripts/install.sh`. TLS/mTLS or reverse-proxy
 authentication can front the proxy port; the API itself remains
 read-oriented either way.
 
@@ -383,7 +322,7 @@ It owns exactly one layer of the stack:
 
 ```
 host firewall / netns   who can reach the port        (not the proxy)
-AppArmor / mounts       process + filesystem authority (not the proxy)
+mount matrix            process + filesystem authority (not the proxy)
 >>> proxy: HTTP admission — is this a valid Tidepool request?
 API over Unix socket    application semantics          (downstream)
 ```
@@ -458,22 +397,13 @@ runnable pieces (each prints PASS/FAIL/SKIP and exits non-zero on FAIL):
 |---|---|
 | `verify-host.sh` | rootless podman present and functional |
 | `verify-install.sh` | host layout exists; corpus not world-readable |
-| `verify-apparmor.sh` | (standalone, optional hardening) profiles loaded |
 | `verify-deployment.sh` | units active, containers healthy, proxy answers, collector publishes no port, replica digest matches `publication.json` |
 | `verify-corpus.sh` | corpus + snapshots structurally verify (in a confined utility container, query-only) |
-| `verify-render.sh` | STRUCTURAL, needs no install: templates render with zero placeholders and no `:latest`, quadlet dry-run, rendered `tidepool.nft` passes `nft -c`, every AppArmor profile parses (`apparmor_parser -Q`) |
+| `verify-render.sh` | STRUCTURAL, needs no install: templates render with zero placeholders and no `:latest`, quadlet generator dry-run |
 
-`verify.sh` runs the first five in order; `verify-render.sh` is the
+`verify.sh` runs the first four in order; `verify-render.sh` is the
 preflight/CI piece and is not part of the live sequence.
 
-Privilege note: `nft -c` needs CAP_NET_ADMIN even as a pure check, so
-`verify-render.sh` and `render.sh` re-run only the two read-only,
-fixed-argv kernel-facing checks (`nft -c`, `apparmor_parser -Q`) through
-non-interactive `sudo -n` when an unprivileged run fails. This exercises a
-passwordless grant the invoking user already holds — it never prompts and
-grants nothing new. Escalated checks are marked `(via sudo)` in output,
-and `TIDEPOOL_VERIFY_NO_SUDO=1` disables escalation (permission-blocked
-checks then SKIP with a stated reason rather than reporting a result).
 
 `boundaries-verify.sh` — negative: ~20 prohibited operations attempted for
 real (write the writer, open the authoritative DB, reach the Internet from
@@ -484,8 +414,8 @@ operation is an incident, and exits non-zero. `--json` emits the
 machine-readable report the weekly `tidepool-verify.timer` archives.
 
 CI covers this in two tiers. `structure.yml` is the slim per-change gate:
-generated-config drift, lock drift, and `verify-render.sh` (render,
-nftables, AppArmor parse) — no image builds, so it runs on every relevant
+generated-config drift, lock drift, and `verify-render.sh` (template render
++ quadlet dry-run) — no image builds, so it runs on every relevant
 PR in minutes. `deploy.yml` is the heavy integrated tier (weekly and
 on-demand): real image builds against `deploy/scripts/ci-topology.sh`,
 **no npm/compilers in any runtime image** (`verify-image-contents.sh`),
@@ -517,8 +447,8 @@ collector unit to make that automatic).
 
 `deploy/scripts/uninstall.sh` backtracks the install with the same stance
 install.sh takes: unprivileged removals performed (services, timers, unit
-files, containers, images, installed tooling), root removals printed
-(AppArmor profiles, the nftables table, any ufw rule, linger). The data
+files, containers, images, installed tooling), root-adjacent cleanup printed
+(any ufw rule you added, linger). The data
 root — corpus, backups, config, keyrings, exports — is **preserved by
 default**; `--purge-data` deletes it after a typed-path confirmation
 (`TIDEPOOL_UNINSTALL_FORCE=1` for non-interactive use), and `--keep-images`

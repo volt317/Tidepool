@@ -47,8 +47,6 @@ deploy/deploy.yaml            single location for build/deploy values that
 deploy/oci/Containerfile      one multi-target build: collector/api/
                               scheduler/proxy/utility
 deploy/quadlet/templates/     Quadlet unit templates (rendered per deployment)
-deploy/apparmor/              seven per-service profiles
-deploy/nftables/              host firewall template (rendered, then adapted)
 deploy/scripts/               install/render/verify/boundaries/backup/restore
                               + lib/deploy-config.sh (the YAML loader)
 scripts/                      generate-deploy-config.mjs (YAML → TS consts),
@@ -186,9 +184,8 @@ the full rationale and names the four reinforcing gates.
 - **structure** — the slim per-change appliance gate: generated
   deploy-config and component-lock drift checks, then
   `deploy/scripts/verify-render.sh` — templates render with zero surviving
-  placeholders and no `:latest`, quadlet generator dry-run, rendered
-  `tidepool.nft` passes `nft -c`, and every AppArmor profile parses with
-  `apparmor_parser -Q`. No image builds; it runs in minutes on any PR
+  placeholders and no `:latest`, plus the quadlet generator dry-run. No
+  image builds; it runs in minutes on any PR
   touching `deploy/`, `shared/`, `scripts/`, or the manifests. The heavy
   invariants (image contents, live topology, negative boundary suite,
   backup/restore round trip) run in **deploy** below.

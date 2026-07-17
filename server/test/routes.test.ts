@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
-import express from "express";
+import express from "../src/http/index.js";
 
 import type { PackageRow, SourceRecord, TidepoolConfig } from "../../shared/types.js";
 import { Aggregator, type UnitProvider, type IndexResult, type AdvisoryJoin } from "../src/core/aggregator.js";

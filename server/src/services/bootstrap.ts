@@ -101,7 +101,6 @@ export function generatorIdentity(): Record<string, unknown> {
     gitCommit: process.env.TIDEPOOL_GIT_COMMIT || null,
     ociImageDigest: process.env.TIDEPOOL_IMAGE_DIGEST || null,
     nodeVersion: process.version,
-    apparmorProfileDigest: process.env.TIDEPOOL_APPARMOR_DIGEST || null,
     quadletDigest: process.env.TIDEPOOL_QUADLET_DIGEST || null,
   };
 }

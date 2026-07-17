@@ -16,10 +16,7 @@ source "$HERE/lib/deploy-config.sh"
 source "$HERE/lib/verify-lib.sh"
 verify_lib_resolve_base
 
-# No apparmor security-opt here: rootless podman refuses custom profiles
-# (ADR 0011) — passing one when profiles are loaded would fail the very
-# machines that applied the optional hardening. Isolation for this job is
-# --network=none + the read-only-intent connection.
+# Isolation for this job: --network=none + the read-only-intent connection.
 UTILITY="$(podman images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' 2>/dev/null | grep '^localhost/tidepool-utility:' | sort -k2 -r | head -1 | cut -d' ' -f1)"
 if [[ -n "$UTILITY" && -f "$BASE/corpus/writer/tidepool.sqlite3" ]]; then
   # shellcheck disable=SC2086

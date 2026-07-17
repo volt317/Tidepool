@@ -11,7 +11,7 @@
 // routes.ts still composes both routers, preserving the original
 // single-process surface for development and tests.
 
-import { Router } from "express";
+import { Router } from "../http/index.js";
 import type { Aggregator } from "./aggregator.js";
 import { exportSnapshot, type ExportFormat, type SnapshotStore } from "./snapshot.js";
 

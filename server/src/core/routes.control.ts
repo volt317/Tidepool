@@ -14,7 +14,7 @@
 // The /control/* endpoints below are NEW code (marked as such): a small
 // scheduler-facing surface added to fit the deployment model.
 
-import { Router } from "express";
+import { Router } from "../http/index.js";
 import type { Aggregator } from "./aggregator.js";
 import { buildSnapshot, type SnapshotStore } from "./snapshot.js";
 import type { SnapshotStage } from "../../../shared/types.js";

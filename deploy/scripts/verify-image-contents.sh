@@ -4,7 +4,7 @@
 #
 #   verify-image-contents.sh <image-tag>     checks all five targets
 #
-# Rationale: AppArmor denying execution of npm is policy; npm not existing
+# Rationale: a policy layer denying npm execution would be policy; npm not existing
 # is fact. The runtime base stage deletes the npm/corepack installation the
 # node:slim base ships; this script is the gate proving that deletion (and
 # the continued absence of compilers) for every target, using node itself

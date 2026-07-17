@@ -5,14 +5,14 @@
 # negative boundaries, ending with backup → restore → digest comparison.
 #
 # Designed for a Podman-capable CI runner (ubuntu-latest works) and equally
-# runnable on a workstation. AppArmor confinement is applied when the host
+# runnable on a workstation.
 # permits loading profiles (CI usually does, with sudo); every step that
 # depends on an optional host facility says which guarantee it exercised.
 #
 # The 19 steps (numbered in output):
 #    1 build all OCI targets            11 positive health tests
 #    2 verify base digest pinning       12 API operation, collector STOPPED
-#    3 compile AppArmor profiles        13 negative boundary tests
+#    3 (reserved)                       13 negative boundary tests
 #    4 ShellCheck deployment scripts    14 create a snapshot
 #    5 render Quadlet templates         15 offline dispatch
 #    6 validate generated units         16 create + verify a backup
@@ -52,22 +52,8 @@ step 2 "verify base image digest pinning"
 [[ "$BASE_IMAGE" == *"@sha256:"* ]] || { echo "base image is not digest-pinned: $BASE_IMAGE"; exit 1; }
 echo "pinned: ${BASE_IMAGE##*@}"
 
-step 3 "compile AppArmor profiles"
-if command -v apparmor_parser >/dev/null; then
-  # -K (skip-cache): compile-check runs unprivileged; do not write the
-  # root-owned /var/cache/apparmor cache (that write fails "Permission denied").
-  apparmor_parser -Q -K "$REPO"/deploy/apparmor/tidepool-* && echo "7 profiles compile"
-  APPARMOR_LOADED=0
-  if [ -w /sys/kernel/security/apparmor/.load ] || sudo -n true 2>/dev/null; then
-    if sudo apparmor_parser -r "$REPO"/deploy/apparmor/tidepool-* 2>/dev/null; then
-      APPARMOR_LOADED=1; echo "profiles loaded into the kernel — containers run CONFINED"
-    fi
-  fi
-  [ "$APPARMOR_LOADED" -eq 1 ] || echo "profiles compile but are not loaded — containers run without LSM confinement in this environment"
-else
-  echo "apparmor_parser unavailable — compile check skipped"; APPARMOR_LOADED=0
-fi
-AA() { [ "${APPARMOR_LOADED:-0}" -eq 1 ] && echo "--security-opt apparmor=$1" || true; }
+step 3 "(reserved — host policy compile step removed)"
+true
 
 step 4 "ShellCheck deployment scripts"
 if command -v shellcheck >/dev/null; then

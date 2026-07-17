@@ -9,8 +9,7 @@
 #
 # The proxy's own netns has outbound routes (rootless networking has no
 # no-egress inbound-only mode) — the proxy CODE never dials anything but the
-# fixed socket path, its AppArmor profile denies connect-out where the LSM
-# supports it, and deploy/nftables/tidepool.nft drops non-Tidepool egress at
+# fixed socket path — a code-level property of the proxy;
 # the host. That layering — not the container flag — is the enforcement.
 
 [Unit]
@@ -43,7 +42,6 @@ PodmanArgs=--memory=128m --cpus=0.5 --ulimit=nofile=2048:2048
 Environment=TIDEPOOL_PROXY_ADDR=0.0.0.0
 Environment=TIDEPOOL_PROXY_PORT=@INTERNAL_PORT@
 Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
-Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
 
 # health over the proxy's own liveness endpoint; NODE_TLS_REJECT is scoped
 # to this one probe process (the local self-signed/local-CA cert) and does

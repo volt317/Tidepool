@@ -30,7 +30,6 @@ PodmanArgs=--pids-limit=64
 PodmanArgs=--memory=128m --cpus=0.25 --ulimit=nofile=512:512
 
 Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
-Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
 
 HealthCmd=node -e "const s=require('fs').statSync('/var/lib/tidepool/run/scheduler-heartbeat.json');process.exit(Date.now()-s.mtimeMs<60000?0:1)"
 HealthInterval=30s

@@ -27,7 +27,7 @@ API's read path. Three weaknesses followed directly:
 Independent containers, one Internet-capable process, published truth:
 
 - **No pod.** Each service has its own network namespace, mount set,
-  AppArmor profile, restart policy, and health signal. The API and
+  restart policy, and health signal. The API and
   scheduler run `--network=none`; a data-less proxy holds the only
   published TCP port and forwards to the API's Unix socket.
 - **The collector publishes a read replica** (SQLite backup API → temp →
@@ -73,7 +73,7 @@ Independent containers, one Internet-capable process, published truth:
   deploy CI runs the full build→collect→publish→read→snapshot→dispatch→
   backup→restore→digest-compare loop in real containers.
 - Claims match mechanisms (the README's enforcement table). Where a layer
-  cannot deliver (AppArmor can't tell inbound from outbound inet; rootless
+  cannot deliver (rootless
   egress is per-user), the limitation is stated and the host firewall is
   declared REQUIRED rather than implied optional.
 - Cost: more moving parts (four units + timers), a replica publication step

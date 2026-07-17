@@ -115,7 +115,6 @@ RUN rm -rf /usr/local/lib/node_modules \
           /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn*
 
 COPY --from=build /src/server/dist          ./server/dist
-COPY --from=build /src/server/node_modules  ./server/node_modules
 COPY --from=build /src/server/migrations    ./server/migrations
 COPY --from=build /src/server/package.json  ./server/package.json
 # Prove the Node baked into this image is major 24 — not a CI variable, the

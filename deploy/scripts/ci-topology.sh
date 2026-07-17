@@ -10,7 +10,7 @@
 #                                      scheduler (proxy on 127.0.0.1:18747)
 #   ci-topology.sh down                stop all four, asserting clean exit 0
 #
-# Requires: TIDEPOOL_HOME exported. AppArmor confinement is applied when the
+# Requires: TIDEPOOL_HOME exported.
 # per-service profiles are loaded in the kernel, else skipped (stated).
 set -euo pipefail
 
@@ -23,10 +23,6 @@ MODE="${1:?usage: ci-topology.sh up <image-tag> | down}"
 : "${TIDEPOOL_HOME:?TIDEPOOL_HOME must be exported}"
 
 AA() {
-  # AppArmor opts deliberately not emitted: rootless podman refuses custom
-  # profiles on every version to date (containers/common IsSupported()
-  # short-circuits on IsRootless) — see ADR 0011. The old conditional here
-  # silently degraded in CI, masking exactly that.
   :
 }
 

@@ -18,7 +18,7 @@
 // (run/collector-control.sock). No TCP at all — the previous pod-loopback
 // port is gone. Socket mode 0660 plus per-service mounts scope who can dial.
 
-import express from "express";
+import express from "../http/index.js";
 
 import { Aggregator } from "../core/aggregator.js";
 import { SqliteObservationStore } from "../core/store.js";
@@ -135,7 +135,7 @@ function publishSoon(reason: string): void {
 // -------------------------------------------------------------- server
 
 const app = express();
-app.use(express.json({ limit: "256kb" })); // control bodies are small by contract
+app.use(express.json({ limit: 262_144 })); // control bodies are small by contract
 
 app.get("/healthz", (_req, res) => {
   const domains = agg.domains();

@@ -15,7 +15,7 @@
 #                       reconstruction reads normalized record blobs and
 #                       finalized snapshots (documented "strictly required"
 #                       exception).
-#   AppArmor          → denies inet/inet6 sockets outright (enforceable here
+#   (namespace absence is the enforcement: with no netns there is
 #                       because of Network=none), denies writer paths by
 #                       name, denies keyrings/cache, denies exec of anything
 #                       but node.
@@ -53,7 +53,6 @@ PodmanArgs=--memory=512m --cpus=1.0 --ulimit=nofile=2048:2048
 
 # ------------------------------------------------------------ environment
 Environment=TIDEPOOL_QUADLET_DIGEST=@QUADLET_DIGEST@
-Environment=TIDEPOOL_APPARMOR_DIGEST=@APPARMOR_DIGEST@
 
 # ------------------------------------------------------------ health check
 HealthCmd=node -e "require('http').request({socketPath:'/var/lib/tidepool/run/api.sock',path:'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1)).end()"

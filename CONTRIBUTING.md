@@ -24,8 +24,9 @@ Things that will get a change declined quickly:
   .generated.ts` and the component locks are generated (`npm run
   generate:deploy-config`, `npm run sync:locks`); never hand-edit them —
   CI's `check:` twins will catch it.
-* **New runtime dependencies.** The server intentionally carries two. A
-  third needs a strong argument in the PR description.
+* **New runtime dependencies.** The server intentionally carries ZERO —
+  the HTTP layer is ~300 audited local lines in `server/src/http/`. Any
+  first runtime dependency needs an ADR, not a PR comment.
 
 Architecture decisions get an ADR in `docs/adr/` (sequential number, the
 Context/Decision/Consequences shape of the existing ones). Documentation

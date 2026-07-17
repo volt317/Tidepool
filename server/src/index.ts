@@ -13,8 +13,8 @@
 // buildRouter() below composes routes.read.ts + routes.control.ts, so this
 // mode's HTTP surface is byte-identical to what it was before the split.
 
-import express from "express";
-import rateLimit from "express-rate-limit";
+import express, { type Router } from "./http/index.js";
+import { rateLimit } from "./http/index.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -50,7 +50,7 @@ function loadConfig(): { config?: TidepoolConfig; errors: string[] } {
   return validateConfig(parsed);
 }
 
-function build(config: TidepoolConfig): { config: TidepoolConfig; router: express.Router; store: SqliteObservationStore } {
+function build(config: TidepoolConfig): { config: TidepoolConfig; router: Router; store: SqliteObservationStore } {
   // .cache stays a disposable TTL response cache; .tidepool is the durable
   // evidence store — two directories, two very different contracts
   const cacheDir = join(ROOT, config.server.cacheDir ?? ".cache");
@@ -127,7 +127,7 @@ app.listen(port, () => {
 // routes; this is a second, local-only door to the same handlers.
 try {
   const control = express();
-  control.use(express.json({ limit: "256kb" }));
+  control.use(express.json({ limit: 262_144 }));
   control.get("/healthz", (_req, res) => res.json({ service: "dev", ok: true, note: "single-process development mode" }));
   control.use("/internal", (req, res, next) => current.router(req, res, next));
   const sock = socketPaths(resolveRuntimeDirs(current.config).runDir).control;

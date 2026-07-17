@@ -153,21 +153,13 @@ main() {
   # ------------------------------------------------------------- root steps
   cat <<EOF
 
-== remaining ROOT steps (printed, not performed) — only relevant if you\n== applied the optional hardening (AppArmor / nftables) ==
+== remaining ROOT steps (printed, not performed) ==
 
-1. AppArmor profiles (unload from kernel, then remove the files):
-     sudo apparmor_parser -R /etc/apparmor.d/tidepool-* 2>/dev/null
-     sudo rm -f /etc/apparmor.d/tidepool-*
-
-2. nftables (delete the table; also remove any persistence you added —
-   /etc/nftables.conf include or the oneshot unit, per your site):
-     sudo nft delete table inet tidepool 2>/dev/null
-
-3. If you added a ufw rule for the proxy port:
+1. If you added a ufw rule for the proxy port:
      sudo ufw status numbered        # find it
      sudo ufw delete <number>
 
-4. Linger — ONLY if nothing else of yours should survive logout
+2. Linger — ONLY if nothing else of yours should survive logout
    (this affects ALL your user services, not just Tidepool):
      loginctl disable-linger \$USER
 
